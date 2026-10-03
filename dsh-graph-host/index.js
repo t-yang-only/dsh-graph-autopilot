@@ -4341,19 +4341,17 @@ export function apply(ctx, config) {
       return sid ? `agent:${sid}` : "agent:unknown";
     };
     const autopilotRoot = (ex, wsOverride) => {
-      if (wsOverride && typeof wsOverride === "string" && wsOverride.trim()) {
-        const ws = resolve(wsOverride.trim());
-        const canonical = resolveCanonicalRoot(config, ws);
-        init(canonical.root);
-        return canonical.root;
+      let ws = null;
+      if (wsOverride && typeof wsOverride === "string" && wsOverride.trim()) ws = wsOverride.trim();
+      else if (ex?.agent?.session?.header?.cwd) ws = ex.agent.session.header.cwd;
+      else if (ex?.agent?.session?.cwd) ws = ex.agent.session.cwd;
+      if (!ws || !isAbsolute(ws)) {
+        // g-149 同语义：无显式 workspace 绝不落到宿主 cwd，避免误写别的目录
+        throw new GraphError("autopilot 端点/工具需要明确的 workspace（query ?workspace= 或 body.workspace 或会话 cwd）");
       }
-      const ws = ex?.agent?.session?.header?.cwd ?? ex?.agent?.session?.cwd ?? null;
-      if (ws && isAbsolute(ws)) {
-        const canonical = resolveCanonicalRoot(config, ws);
-        init(canonical.root);
-        return canonical.root;
-      }
-      return root; // 回落到宿主配置 root（与 REST 语义一致：无显式 workspace 用默认）
+      const canonical = resolveCanonicalRoot(config, resolve(ws));
+      init(canonical.root);
+      return canonical.root;
     };
 
     function autopilotFinish(root, r, reason) {
