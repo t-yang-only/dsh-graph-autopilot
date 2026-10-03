@@ -22,8 +22,6 @@ PARTS=(
   "session-hooks"
   "live-panel"
   "supervisor-bar"
-  # [autopilot-fork] 自动驾驶面板（工厂作用域组件，kanban.js 渲染引用；必须在 drag-prompts 之前）
-  "autopilot"
   "card"
   "markdown"
   "card-drawer"
@@ -56,6 +54,12 @@ PARTS=(
   # （工厂作用域），与 version-drawer 同理——夹在 drag-prompts 与 kanban 之间会变成
   # KanbanView 内部嵌套函数，每次渲染产生新组件身份导致 React 卸载重建弹窗子树。
   "batch-accept"
+  # [autopilot-fork] 自动驾驶面板（工厂作用域组件，kanban.js 渲染引用）。
+  # ⚠️ 不能放在 supervisor-bar 与 card 之间——那两个文件是「故意拆成两半的一个函数」
+  # （supervisor-bar 以未闭合的 function CardSummary(){ 结尾，card.js 接着它的函数体），
+  # 插在中间会让本模块变成 CardSummary 内部的嵌套函数，KanbanView 里引用直接 ReferenceError。
+  # 放 batch-accept 之后、drag-prompts 之前 = 工厂作用域安全区。
+  "autopilot"
   "drag-prompts"
   "kanban"
   "shared-panel"
