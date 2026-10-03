@@ -1764,6 +1764,16 @@
           label,
           // g-352 att-003 第 8 项：「查看版本」下拉就挂在版本行标题里、[ + ] 左侧（单泳道档唯一一行）
           vertical ? laneVersionPickerEl : null,
+          // [v0.20] 行自带 ▶：直接在这行启动自动驾驶（负责人要求：不要把 ▶ 集中在面板里）
+          version ? h("button", {
+            style: {
+              ...S.btn, position: "absolute", right: 34, top: 8, bottom: "auto",
+              ...(vertical ? rowBtnStyle({ iconOnly: true }) : { fontSize: 11, padding: "0 5px", lineHeight: 1.4 }),
+            },
+            className: "dg-btn",
+            title: "自动驾驶本行：逐目标 收集→执行→评审（机审按当前设置）→交付",
+            onClick: (e) => { e.stopPropagation(); apRunLane(version, label); },
+          }, "▶") : null,
           // g-129: 每个 lane 标题右下角加「+」按钮（版本 lane 预选版本，独立/backlog 进 backlog）
           h("button", {
             style: {
@@ -3169,6 +3179,8 @@
                 // g-135: 版本摘要/范围（从 version.md 的「范围」小节读取）
                 h("div", { style: { marginBottom: 12 } },
                   h("div", { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } }, dgT("versionDetail.summary")),
+                  // [v0.20] 每条泳道在自己的详情弹窗里编辑「职责提示词」（派发时注入执行子代理）
+                  h(LanePromptEditor, { workspace: activeWs, lane: versionDetailTarget.slug }),
                   versionDetailLoading
                     ? h("div", { style: { fontSize: 12, opacity: 0.5 } }, dgT("common.loading"))
                     : (versionDetailData?.summary || versionDetailData?.scope)

@@ -251,7 +251,8 @@
     // ===== g-214：看板刷新间隔配置与自定义倒计时 =====
     const REFRESH_INTERVAL_KEY = "dsh-graph.refresh-interval";
     const DEFAULT_REFRESH_INTERVAL = 15;
-    const MIN_REFRESH_INTERVAL = 5;
+    // [v0.20] 负责人要求「可以实时刷新」：下限 5s → 1s（1 秒即准实时；再低只会把宿主与看板打满，收益为零）
+    const MIN_REFRESH_INTERVAL = 1;
 
     function getRefreshInterval() {
       try {

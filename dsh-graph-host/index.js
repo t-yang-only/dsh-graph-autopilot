@@ -192,6 +192,7 @@ import {
   setLanePrompt,
   lanePromptFor,
   restoreGoalToDraft,
+  listBlockedGoals,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -5151,11 +5152,35 @@ export function apply(ctx, config) {
       for (const r of [...apKnownRoots].slice(0, 5)) {
         try {
           const st = readAutopilotState(r);
+          const ws = dirname(r);
+          // [v0.20] 阻塞自愈：存在 ⛔ 阻塞目标 → 自动唤起管理员去解决并推动（30 分钟冷却，独立于「启用实时管理」开关）
+          try {
+            const blocked = listBlockedGoals(r);
+            if (blocked.length) {
+              const stamp = st.blockerHandledAt ? Date.parse(st.blockerHandledAt) : 0;
+              const coolMs = 30 * 60_000;
+              if (!Number.isFinite(stamp) || Date.now() - stamp > coolMs) {
+                const prompt = [
+                  buildManagerPrompt(r, ws),
+                  "",
+                  "【本次特别任务：处理阻塞】",
+                  "以下目标处于 blocked，请分析阻塞原因并给出解除阻塞的具体步骤，能直接推动的就按流程推动（必要时更新判据/描述或补上下文卡片）：",
+                  ...blocked.map((b) => `- ${b.id} ${b.title}｜泳道 ${b.lane}｜阻塞原因：${b.reason ?? "未填写"}`),
+                ].join("\n");
+                writeAutopilotState(r, { blockerHandledAt: new Date().toISOString() }, { actor: "system:autopilot" });
+                appendEvent(r, {
+                  actor: "system:autopilot",
+                  event: "autopilot.blocker_auto_manager",
+                  details: { count: blocked.length, goals: blocked.map((b) => b.id) },
+                });
+                void spawnChild("graph:rec-manager(blocked)", prompt, { on: () => {} }, r, { role: "pm" });
+              }
+            }
+          } catch { /* 阻塞自愈失败不影响定时器 */ }
           if (!st.managerEnabled) continue;
           const last = st.managerLastRun ? Date.parse(st.managerLastRun) : 0;
           const intervalMs = Math.max(1, Number(st.managerIntervalMin) || 30) * 60_000;
           if (Number.isFinite(last) && Date.now() - last < intervalMs) continue;
-          const ws = dirname(r);
           const prompt = buildManagerPrompt(r, ws);
           writeAutopilotState(r, { managerLastRun: new Date().toISOString() }, { actor: "system:autopilot" });
           appendEvent(r, { actor: "system:autopilot", event: "autopilot.manager_run_started", details: { workspace: ws, auto: true } });

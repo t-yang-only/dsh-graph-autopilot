@@ -44,6 +44,8 @@ export interface AutopilotState {
   managerLastRun: string | null;
   /** [v0.18] 允许管理员顺带维护全局目标 / 全局提示词。 */
   managerUpdateGlobals: boolean;
+  /** [v0.20] 上次「阻塞自愈」唤起管理员的时间（ISO），用于冷却，避免反复拉起。 */
+  blockerHandledAt?: string | null;
   /** [v0.19] 泳道职责提示词：key = 泳道键（版本 slug / standalone / backlog），值 = 该泳道是干什么的（派发时注入执行子代理）。 */
   lanePrompts: Record<string, string>;
 }
@@ -1172,6 +1174,43 @@ export function applyManagerResult(
     details: { recommendations: recCount, globalGoalUpdated: goalUpdated, globalPromptUpdated: promptUpdated, notes: String(input.notes ?? "").slice(0, 200) },
   });
   return { recommendations: recCount, globalGoalUpdated: goalUpdated, globalPromptUpdated: promptUpdated };
+}
+
+/** [v0.20] 列出处于阻塞状态的目标（供「阻塞自愈」自动唤起管理员）。 */
+export function listBlockedGoals(root: string): { id: string; title: string; reason: string | null; lane: string }[] {
+  const out: { id: string; title: string; reason: string | null; lane: string }[] = [];
+  const push = (file: string, lane: string) => {
+    try {
+      const doc = loadGoal(file);
+      if (String(doc.meta.status ?? "") !== "blocked") return;
+      out.push({
+        id: String(doc.meta.id ?? ""),
+        title: String(doc.meta.title ?? ""),
+        reason: doc.meta.blocked_reason ? String(doc.meta.blocked_reason) : null,
+        lane,
+      });
+    } catch { /* 半成品跳过 */ }
+  };
+  const vd = join(root, "versions");
+  if (existsSync(vd)) {
+    for (const v of readdirSync(vd)) {
+      const gd = join(vd, v, "goals");
+      if (!existsSync(gd)) continue;
+      for (const id of readdirSync(gd)) {
+        const f = join(gd, id, "goal.md");
+        if (existsSync(f)) push(f, v);
+      }
+    }
+  }
+  const sd = join(root, "goals");
+  if (existsSync(sd)) {
+    for (const id of readdirSync(sd)) {
+      if (id === "archived") continue;
+      const f = join(sd, id, "goal.md");
+      if (existsSync(f)) push(f, "standalone");
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

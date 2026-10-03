@@ -613,7 +613,7 @@
       'settings.hideAdvanced': '隐藏高级/仅存储字段',
       'settings.autoRefresh': '看板数据自动刷新：',
       'settings.seconds': '秒',
-      'settings.minInterval': '（下限 5 秒）',
+      'settings.minInterval': '（下限 1 秒：设 1~2 即准实时刷新）',
       'settings.intervalWarn': '刷新间隔最小限制为 5 秒（保存时将自动纠偏为 5s）',
       'settings.intervalMinError': '⚠️ ',
       'settings.liveDisplay': '实时代理输出流式显示',

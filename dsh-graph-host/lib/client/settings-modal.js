@@ -405,7 +405,18 @@
               onChange: (e) => handleIntervalChange(e.target.value),
             }),
             h("span", { style: { ...S.meta, fontSize: 11, flexShrink: 0 } }, dgT("settings.seconds")),
-            h("span", { style: { ...S.meta, fontSize: 11, opacity: 0.7 } }, dgT("settings.minInterval"))),
+            h("span", { style: { ...S.meta, fontSize: 11, opacity: 0.7 } }, dgT("settings.minInterval")),
+            // [v0.20] 一键实时刷新（2 秒）
+            h("button", {
+              className: "dg-btn",
+              style: { ...S.btn, padding: "2px 8px", fontSize: 11, flexShrink: 0, marginLeft: 6 },
+              title: "实时刷新：把自动刷新间隔设为 2 秒（准实时）",
+              onClick: () => {
+                setRefreshIntervalInput("2");
+                handleIntervalChange("2");
+                try { setRefreshInterval(2); } catch { /* 无 localStorage 时忽略 */ }
+              },
+            }, "实时(2s)")),
           intervalWarn ? h("div", { style: { ...S.meta, color: "var(--dsw-alias-state-error-primary, #f08080)", marginTop: 2 } }, "⚠️ " + intervalWarn) : null,
 
           // g-224：实时代理输出流式显示开关——关闭后停止高频输出流订阅（释放网络/内存/CPU），

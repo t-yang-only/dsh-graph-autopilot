@@ -53,6 +53,42 @@ function apAdoptIntoLane(target) {
     .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
 }
 
+/** [v0.20] 行自带 ▶：直接在这个泳道行上启动自动驾驶（不用回面板） */
+function apRunLane(version, label) {
+  if (!version || !apPanelWorkspace) return;
+  apNotify("▶ 正在启动「" + (label || version) + "」的自动驾驶…");
+  fetch("/api/dsh-graph-autopilot/run", {
+    method: "POST", credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workspace: apPanelWorkspace, version }),
+  })
+    .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok) { apNotify("❌ 启动失败：" + (d?.error ?? "未知错误")); return; }
+      apNotify("✅ 已启动自动驾驶：" + (label || version));
+      window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
+    })
+    .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
+}
+
+/** [v0.20] 行自带 ⏸：中断本行自动驾驶 */
+function apStopLane(label) {
+  if (!apPanelWorkspace) return;
+  apNotify("⏸ 正在中断" + (label ? "「" + label + "」" : "") + "的自动驾驶…");
+  fetch("/api/dsh-graph-autopilot/stop", {
+    method: "POST", credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workspace: apPanelWorkspace }),
+  })
+    .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok) { apNotify("❌ 中断失败：" + (d?.error ?? "未知错误")); return; }
+      apNotify("⏸ 已中断本行自动驾驶");
+      window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
+    })
+    .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
+}
+
 /** [v0.18] 看板卡片拖到回收站 = 归档该目标（可从回收站恢复） */
 function apArchiveGoal(goalId) {
   if (!goalId || !apPanelWorkspace) return;
@@ -814,7 +850,70 @@ function TrashLane(props) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// [v0.20] 泳道职责编辑器：嵌进「版本详情」弹窗——每条泳道在自己的详情里说明它是干什么的
+// ---------------------------------------------------------------------------
+function LanePromptEditor(props) {
+  const workspace = props?.workspace ?? null;
+  const lane = String(props?.lane ?? "").trim();
+  const [text, setText] = React.useState("");
+  const [saved, setSaved] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg] = React.useState("");
+
+  React.useEffect(() => {
+    if (!workspace || !lane) return;
+    let alive = true;
+    fetch("/api/dsh-graph-autopilot/manager", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "lane-prompt-get", lane }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive && d?.ok) { setText(d.text ?? ""); setSaved(d.text ?? ""); } })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [workspace, lane]);
+
+  if (!workspace || !lane) return null;
+  const dirty = text !== saved;
+  return h("div", { style: { marginTop: 10, borderTop: "1px solid rgba(128,128,128,.25)", paddingTop: 8 } },
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 } },
+      h("span", { style: { fontWeight: 700, fontSize: 12 } }, "🏷 泳道职责提示词"),
+      h("span", { style: { ...AP_ROW_CHIP, fontSize: 10 } }, lane),
+      dirty ? h("span", { style: { fontSize: 10, color: "#e0a53a" } }, "未保存") : null,
+    ),
+    h("textarea", {
+      style: { ...AP_ROW_INPUT, width: "100%", minHeight: 56, resize: "vertical", boxSizing: "border-box" },
+      value: text,
+      placeholder: "这条泳道是干什么的？（如：后端=服务端接口与数据；部署测试=发版与冒烟验证）派发该泳道任务时会注入给执行子代理；留空保存=清除",
+      onChange: (e) => setText(e.target.value),
+    }),
+    h("div", { style: { display: "flex", gap: 6, alignItems: "center", marginTop: 4 } },
+      h("button", {
+        style: AP_ROW_PRIMARY, disabled: busy,
+        onClick: () => {
+          setBusy(true); setMsg("");
+          fetch("/api/dsh-graph-autopilot/manager", {
+            method: "POST", credentials: "same-origin",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ workspace, action: "lane-prompt-set", lane, text }),
+          })
+            .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+            .then(({ ok, d }) => {
+              if (!ok) { setMsg("❌ " + (d?.error ?? "保存失败")); return; }
+              setSaved(text); setMsg("✅ 已保存");
+            })
+            .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+            .finally(() => setBusy(false));
+        },
+      }, busy ? "…" : "保存泳道职责"),
+      msg && h("span", { style: { fontSize: 11 } }, msg),
+    ),
+  );
+}
+
 >>>ESM-EXPORTS-START>>>
 // 仅 node --test / 静态检查用；浏览器 bundle 由 build-client.sh 剥离本块。
-export { AutopilotPanel, TemplateLane, TrashLane, apDragStart, apDragEnd, apAdoptIntoLane, apArchiveGoal };
+export { AutopilotPanel, TemplateLane, TrashLane, LanePromptEditor, apDragStart, apDragEnd, apAdoptIntoLane, apArchiveGoal };
 <<<ESM-EXPORTS-END<<<
