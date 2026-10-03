@@ -119,8 +119,10 @@
       const [laneDraft, setLaneDraft] = React.useState({}); // [v0.27] 按泳道选模型的草稿（原在自动驾驶面板，迁移至此）
       // 无提示模式（与自动驾驶面板共用存储键与开关函数；typeof 守卫：单测沙箱里 autopilot 模块未加载）
       const [noHints, setNoHints] = React.useState(() => (typeof apNoHintsOn === "function" ? apNoHintsOn() : false));
-      // 泳道 key → 中文标签（默认/部署测试/交互/后端/独立目标/草稿）
-      const AP_LANE_LABELS = { "*": "默认", "deploy-test": "部署测试", "interaction": "交互", "backend": "后端", "standalone": "独立目标", "backlog": "草稿" };
+      // 泳道 key → 中文标签（默认/部署/交互/后端/独立目标/草稿）
+      // [v0.29] 问题 8：「部署测试」显示名统一改为「部署」（与 version.md 的 name 归一一致；
+      // 只改显示值，i18n key 名与泳道 slug（deploy-test）保持不变）。
+      const AP_LANE_LABELS = { "*": "默认", "deploy-test": "部署", "interaction": "交互", "backend": "后端", "standalone": "独立目标", "backlog": "草稿" };
       const AP_LANE_KEYS = ["*", "deploy-test", "interaction", "backend", "standalone", "backlog"];
       // 新控件的显式配色（本机主题下 var(--dsw-alias-*) 会解析成白色 ⇒ 白底白字，故不使用主题变量；
       // 深色值刻意避开 g-176 契约禁止的 #2a2b31 字面量，改用同一深色系的 #20222a）

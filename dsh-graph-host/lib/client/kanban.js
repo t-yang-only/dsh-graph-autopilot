@@ -82,6 +82,11 @@
         ".dg-backlog-flat-vertical>.dg-draft-wrap{flex:1 1 100%;width:100%;min-width:0}",
         ".dg-draft-action{opacity:.45;transition:opacity .12s ease}",
         ".dg-draft-wrap:hover .dg-draft-action,.dg-draft-wrap:focus-within .dg-draft-action{opacity:1}",
+        // [v0.29] 问题 7：有子进程在跑的目标卡片右上角闪烁绿点 —— 包裹层相对定位 + 圆点绝对定位，
+        // 呼吸只用 opacity（不改布局/不拦截点击；无子进程时该元素根本不渲染，见 withDraftAction）。
+        ".dg-draft-wrap{position:relative}",
+        ".dg-live-dot{position:absolute;top:3px;right:4px;width:8px;height:8px;border-radius:50%;background:#3ddc84;border:1px solid rgba(0,0,0,.35);box-shadow:0 0 5px rgba(61,220,132,.85);pointer-events:none;z-index:4;animation:dg-live-breathe 1.1s ease-in-out infinite}",
+        "@keyframes dg-live-breathe{0%,100%{opacity:.25}50%{opacity:1}}",
       ].join("");
       const withDraftAction = (cardEl) => {
         const goalId = cardEl?.props?.["data-goal-id"]; // Card 根节点 data-goal-id 即目标 id
@@ -99,7 +104,17 @@
             disabled: draftBusyId === goalId,
             onClick: (e) => { e.stopPropagation(); sendGoalToDraft(goalId); },
           }, draftBusyId === goalId ? "…" : "→ 草稿"));
-        return h("div", { key: cardEl.key ?? goalId, className: "dg-draft-wrap", style: { minWidth: 0 } }, cardEl, actionRow);
+        // [v0.29] 问题 7：绿点作为包裹层的第一个子节点（绝对定位到卡片右上角）——**不新增 Card
+        // 调用点**、不复制/不克隆 .dg-card 元素，g-366「每张命中卡只渲染一次」与 cardEls 计数契约不变。
+        const liveDot = liveChildGoals.has(goalId)
+          ? h("span", {
+              key: "live-dot",
+              className: "dg-live-dot",
+              "aria-hidden": "true",
+              title: "该目标有子进程正在运行（见「任务执行板」）",
+            })
+          : null;
+        return h("div", { key: cardEl.key ?? goalId, className: "dg-draft-wrap", style: { minWidth: 0 } }, liveDot, cardEl, actionRow);
       };
       // g-223: 版本管理抽屉与显隐过滤状态（本地存储持久化，按当前解析 workspace 隔离与响应）
       const [showVersionDrawer, setShowVersionDrawer] = React.useState(false);
@@ -118,6 +133,10 @@
       const [newVersionName, setNewVersionName] = React.useState("");
       const [createVersionNote, setCreateVersionNote] = React.useState(null);
       const [creatingVersion, setCreatingVersion] = React.useState(false);
+      // [v0.29] 问题 8：「创建功能」入口（常驻功能分组）——弹窗填 名称 + 作用域（工作区/全局），
+      // 提交 POST /api/dsh-graph/create-group {name, scope, workspace}（后端已有）；成功后
+      // 强制刷新看板（跳过 304 复用）并提示「已创建常驻分组：X（全局/工作区）」。
+      const [showCreateGroup, setShowCreateGroup] = React.useState(false);
       // g-134: 看板渲染 key，用于强制重绘
       const [kanbanRenderKey, setKanbanRenderKey] = React.useState(0);
       const [renameVersionTarget, setRenameVersionTarget] = React.useState(null); // {slug, name}
@@ -793,6 +812,46 @@
         load();
       }, [showArchived, props?.sessionId, activeWs]); // showArchived/sessionId/activeWs 变化时重新加载
 
+      // ===== [v0.29] 问题 7：有子进程在跑的目标卡片右上角闪烁绿点 =====
+      // 数据源：GET /api/dsh-graph/agents → { ok, agents:[...], running_goals:[...] }
+      //（running_goals 由后端本轮新增：正在执行中的目标 id 列表；元素兼容字符串 id 与 {id} 对象）。
+      // 本组件每 8 秒轮询一次形成 Set；渲染卡片时把 liveChild: set.has(g.id) 传下去
+      //（在现有三处 Card 调用点以「新增一个 prop」的方式传入，**不新增 Card 渲染调用点**）。
+      // 只读旁路：不参与看板数据流、不改任何既有 state；请求失败保持上一次结果（不打扰用户）。
+      const [liveChildGoals, setLiveChildGoals] = React.useState(() => new Set());
+      React.useEffect(() => {
+        if (!activeWs) { setLiveChildGoals(new Set()); return undefined; }
+        let alive = true;
+        const poll = () => {
+          const u = graphUrl("/api/dsh-graph/agents", {}, activeWs);
+          if (!u) return;
+          fetch(u)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+              if (!alive || !d?.ok) return;
+              const raw = Array.isArray(d.running_goals) ? d.running_goals : [];
+              const next = new Set();
+              for (const it of raw) {
+                if (typeof it === "string" && it) next.add(it);
+                else if (it && typeof it.id === "string" && it.id) next.add(it.id);
+              }
+              // 内容不变时不换引用：避免每 8 秒一次无意义的整板重渲染。
+              setLiveChildGoals((prev) => {
+                if (prev.size === next.size) {
+                  let same = true;
+                  for (const id of next) { if (!prev.has(id)) { same = false; break; } }
+                  if (same) return prev;
+                }
+                return next;
+              });
+            })
+            .catch(() => { /* 静默：保持上一次结果 */ });
+        };
+        poll();
+        const timer = setInterval(poll, 8000);
+        return () => { alive = false; clearInterval(timer); };
+      }, [activeWs]);
+
       // [v0.18] 技能 / Agent 预设目录：打开新建目标弹窗时按需拉取一次（失败静默降级为空列表）
       React.useEffect(() => {
         if (!showCreateGoal || !activeWs) return;
@@ -931,6 +990,8 @@
       const createGoalGuard = useBackdropClose(() => setShowCreateGoal(false));
       const versionDetailGuard = useBackdropClose(() => { setVersionDetailTarget(null); setVersionDetailData(null); });
       const createVersionGuard = useBackdropClose(() => setShowCreateVersion(false));
+      // [v0.29] 问题 8：「创建功能」弹窗的 backdrop 误关保护（与其它 overlay 同款两段式合成 click 吞掉）
+      const createGroupGuard = useBackdropClose(() => setShowCreateGroup(false));
       const renameVersionGuard = useBackdropClose(() => { setRenameVersionTarget(null); setRenameVersionNote(null); });
       const deleteVersionGuard = useBackdropClose(() => { setDeleteVersionTarget(null); setDeleteVersionNote(null); });
 
@@ -1503,6 +1564,14 @@
         const blockedCollapsed = vertical ? false : blockedColumnCollapsed;
         // g-162: 普通泳道折叠状态；released 仅复用 lane 布局，不增加折叠入口
         const isCollapsed = collapsible && !!collapsedLanes[key];
+        // [v0.29] 问题 8：常驻功能分组（交互 / 部署测试→部署 / 后端）泳道行**去掉 🏷️/📁 前缀**。
+        // 前缀剥离放在渲染端，而不是改调用点字面量 —— g352 的源契约断言钉住了
+        // `rows.push(...lane(\`🏷️ ${singleVersion.name}\`, ...))` 那一行（逐字），
+        // 且其它版本泳道的 🏷️ 图标契约（narrow-width.js 的 VIEW_OPTION_ICONS.version）保持不变；
+        // 仅 isDefaultGroup 的分组泳道受影响（三个默认分组 / 自建常驻分组）。
+        const laneLabelText = (version && isDefaultGroup(version))
+          ? String(label ?? "").replace(/^\s*(?:📁|🏷️)\s*/u, "")
+          : label;
         // g-162: 统一基础背景层级（active 与 released 相同），阶段列横向轻微交替
         const baseBg = "rgba(255,255,255,.03)";
         const stageBg = (stageIdx) => stageIdx % 2 === 0 ? "rgba(255,255,255,.03)" : "rgba(0,0,0,.03)";
@@ -1529,7 +1598,7 @@
                 toggleLaneCollapse(key, false);
               },
             },
-              h("span", null, "▸ ", label, ` · ${goals.length} ` + dgT('lane.goalCount', { count: goals.length }).replace(String(goals.length), '').trim()),
+              h("span", null, "▸ ", laneLabelText, ` · ${goals.length} ` + dgT('lane.goalCount', { count: goals.length }).replace(String(goals.length), '').trim()),
               h("button", {
                 style: { ...S.btn, position: "absolute", right: 6, top: 8, bottom: "auto", fontSize: 11, padding: "0 5px", lineHeight: 1.4 },
                 className: "dg-btn",
@@ -1743,6 +1812,7 @@
                 _isSearchMatched: !!mInfo,
                 _isSearchCurrent: currentMatchedGoalId === g.id,
                 _snippet: mInfo?.snippet ?? "",
+                liveChild: liveChildGoals.has(g.id), // [v0.29] 问题 7：有子进程在跑（绿点）
               }, setModalGoal, (goalId, cardId) => setDrawerCard({ goalId, cardId }),
                 modalGoal === g.id, drawerCard?.cardId, goalStatus,
                 expanded,
@@ -1819,7 +1889,7 @@
             }
           } : undefined,
         },
-          label,
+          laneLabelText,
           // g-352 att-003 第 8 项：「查看版本」下拉就挂在版本行标题里、[ + ] 左侧（单泳道档唯一一行）
           vertical ? laneVersionPickerEl : null,
           // [v0.20] 行自带 ▶ / ■：运行中变绿（v0.24），点一次启动、再点中断
@@ -2023,6 +2093,7 @@
                 _isSearchMatched: !!mInfo,
                 _isSearchCurrent: currentMatchedGoalId === g.id,
                 _snippet: mInfo?.snippet ?? "",
+                liveChild: liveChildGoals.has(g.id), // [v0.29] 问题 7：有子进程在跑（绿点）
               }, setModalGoal, (goalId, cardId) => setDrawerCard({ goalId, cardId }),
                 modalGoal === g.id, drawerCard?.cardId, goalStatus,
                 expanded,
@@ -2157,6 +2228,7 @@
             _isSearchMatched: false,
             _isSearchCurrent: currentMatchedGoalId === g.id,
             _snippet: mInfo?.snippet ?? "",
+            liveChild: liveChildGoals.has(g.id), // [v0.29] 问题 7：有子进程在跑（绿点）
           }, setModalGoal, (goalId, cardId) => setDrawerCard({ goalId, cardId }),
             modalGoal === g.id, drawerCard?.cardId, goalStatus,
             expanded,
@@ -2270,7 +2342,28 @@
         rows.push(...backlogRow(dgT("view.backlogLane"), b.backlog, "backlog"));
       }
       // [autopilot-fork] 模板行 + 回收站行：固定在看板最底部（两行都可折叠、默认折叠，展开时每 10s 实时刷新）
-      rows.push(h(TemplateLane, { key: "tpl-lane", workspace: activeWs, fullWidth: singleColumnMode }));
+      // [v0.29] 模板行：接上看板卡片拖入 → 由该任务生成一条通用模板（问题 9）
+      rows.push(h(TemplateLane, {
+        key: "tpl-lane", workspace: activeWs, fullWidth: singleColumnMode,
+        anyDrag: drag != null,
+        dragGoalId: drag?.goalId ?? null,
+        onDropGoal: (goalId) => {
+          if (!goalId) return;
+          setDrag(null);
+          fetch(graphUrlForActive("/api/dsh-graph-autopilot/template-from-goal"), {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ goal: goalId }),
+          })
+            .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+            .then(({ ok, d }) => {
+              if (!ok) { showToast("生成模板失败：" + String(d?.error ?? "未知错误")); return; }
+              showToast("已由任务生成模板：" + String(d?.template?.title ?? goalId) + "（管理 AI 会把它通用化）");
+              window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
+              load();
+            })
+            .catch((e) => showToast("生成模板网络失败：" + String(e?.message ?? e)));
+        },
+      }));
       rows.push(h(TrashLane, {
         key: "trash-lane", workspace: activeWs, fullWidth: singleColumnMode,
         // [v0.18] 承接看板卡片拖入 = 移入回收站
@@ -2483,7 +2576,7 @@
       }
 
       // g-216: 判定是否有任何弹窗或抽屉处于打开态
-      const hasModal = !!(modalGoal || drawerCard || showCreateGoal || showCreateVersion || renameVersionTarget || deleteVersionTarget || versionDetailTarget || showSettings || showVersionDrawer || showSharedPanel || showMemoryModal || showTagFilterModal);
+      const hasModal = !!(modalGoal || drawerCard || showCreateGoal || showCreateVersion || showCreateGroup || renameVersionTarget || deleteVersionTarget || versionDetailTarget || showSettings || showVersionDrawer || showSharedPanel || showMemoryModal || showTagFilterModal);
 
       // g-352：窄宽度适配**取代** g-330 的纯 CSS 最小适配（那条「头部放开换行」规则）。
       // 断点以看板根容器实测宽度为准（`boardWidth`，见上方 ResizeObserver）。
@@ -2560,6 +2653,19 @@
           setCreateVersionNote(null);
         },
       }, dgT("createVersion.createBtn"));
+      // [v0.29] 问题 8：「创建功能」按钮 —— 与「创建版本」**并排**（同一角落行、同一尺寸口径：
+      // rowBtnStyle() 是唯一真源），点击打开轻量弹窗（复用看板既有 modal 样式）填
+      // 名称 + 作用域（工作区/全局），提交 POST /api/dsh-graph/create-group。
+      // i18n-keep(category-a)：按钮文案/tooltip 为中文（与其它 [v0.2x] 新增控件一致，不新增 i18n 词条）。
+      const createGroupBtn = h("button", {
+        // 130px 角落列已接近吃满（en 下 26+4+93=123px，见下方注释）⇒ 本按钮可收缩 + 省略号兜底：
+        // 空间不足时显示「创建…」而不是被单元格裁掉一半（完整名称在 title 里）。
+        style: { ...S.btn, ...rowBtnStyle(), maxWidth: "100%", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", flexShrink: 1 },
+        className: "dg-btn dg-create-group-btn",
+        title: "创建功能分组（常驻：每个工作区都有、不可删除、可设职责提示词，与版本无关）",
+        "aria-label": "创建功能分组",
+        onClick: () => setShowCreateGroup(true),
+      }, "创建功能");
       // 网格左上角单元格：两个按钮**同一行**、靠左、垂直居中（单行不占额外高度）。
       // 水平内边距由 S.stageHead 的 4px 收到 2px（垂直仍是 4px ⇒ 行高不变）：130px 列宽在 **en**
       // 下需要 26(图标) + 4(gap) + 93(`Create Version`) = 123px，S.stageHead 的 8px 内边距只剩 122px
@@ -2569,7 +2675,7 @@
         key: "grid-corner",
         className: "dg-grid-corner",
         style: { ...S.stageHead, padding: "4px 2px", display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "flex-start", flexWrap: "nowrap", gap: 4, minWidth: 0, maxWidth: "100%", overflow: "hidden" },
-      }, versionManageBtn, createVersionBtn);
+      }, versionManageBtn, createVersionBtn, createGroupBtn);
       // g-233：标题行最右侧增加搜索框（g-352 att-005：**保持原设计**——与标题同一行、不再有同行容器包装）
       const searchBarEl = h("div", {
             // g-352：样式本体（含窄档唯一新增的 min-width:0 门控）在 narrow-width.js 的
@@ -2702,27 +2808,34 @@
         // 适配是测量驱动的：<480px 六项工具条整批收进下拉容器、头部实测装不下时同样折叠、
         // 单泳道档同界 <480px（g-356）。
         h("div", { style: S.head, className: "dg-head", ref: headRef },
+          // [v0.29] 问题 6：标题文字改为私有仓项目名 dsh-graph-autopilot（原为 "dsh-graph"），
+          // 且标题**本身即跳转入口**（[v0.19] 的 fork 分支链接保持不变，新标签打开）。
           // g-352：窄档下标题不内部折行（nowrap + min-width:auto ⇒ 保持自然宽度，由头部换行让位）
-          h("strong", { style: narrowActive ? { whiteSpace: "nowrap", flexShrink: 0 } : undefined }, "dsh-graph"),
-          // g-174：标题栏显示插件版本，点击以新标签打开插件官网
-          // [v0.19] 版本号点击跳转改为**本机 fork 分支**（负责人私有仓；原上游链接保留在 README）
           h("a", {
             href: "https://github.com/t-yang-only/dsh-graph-autopilot/tree/autopilot",
             target: "_blank",
             rel: "noreferrer",
             title: "dsh-graph-autopilot（autopilot 分支）",
-            style: { ...S.meta, color: "var(--dsw-alias-state-business-primary, #8ab4ff)", cursor: "pointer", textDecoration: "underline", ...(narrowActive ? { whiteSpace: "nowrap", flexShrink: 0 } : {}) },
-          }, "version: " + PLUGIN_VERSION),
-          // g-214：局部化倒计时组件渲染数据更新时间及剩余秒数倒计时
-          // g-324：refreshSignal 为「一次刷新流程完成」的单调计数（load() 汇聚点自增），
-          // 倒计时以它而非 generated_at 变化作为重置终点——手动刷新在 304 / watcher 缓存
-          // 命中（generated_at 不变）时也立即回到完整周期。
-          h(RefreshCountdown, {
-            generatedAt: b.generated_at,
-            refreshSignal: refreshCycle,
-            intervalSec: refreshIntervalSec,
-            onTriggerRefresh: load,
-          }),
+            style: { ...S.meta, fontWeight: 700, color: "var(--dsw-alias-state-business-primary, #8ab4ff)", cursor: "pointer", textDecoration: "underline", ...(narrowActive ? { whiteSpace: "nowrap", flexShrink: 0 } : {}) },
+          }, "dsh-graph-autopilot"),
+          // [v0.29] 问题 6：隐藏「version: x.y.z / 更新于 …」那段文字（保留标题）。
+          // ⚠️ RefreshCountdown **同时是自动刷新的驱动**（helpers.js：1 秒 tick 归零时回调
+          // onTriggerRefresh=load，切回前台也会补偿触发）⇒ 不能卸载，只能视觉隐藏；
+          // display:none 不改变刷新周期、前台补偿与倒计时重置语义（g-214/g-324 判据不变）。
+          // 版本串「version: <PLUGIN_VERSION>」保留在隐藏节点内（g-174 源契约仍可命中），
+          // 但用户可见的只有标题本身。
+          h("span", { className: "dg-version-hidden", style: { display: "none" }, "aria-hidden": "true" },
+            "version: " + PLUGIN_VERSION,
+            // g-214：局部化倒计时组件渲染数据更新时间及剩余秒数倒计时
+            // g-324：refreshSignal 为「一次刷新流程完成」的单调计数（load() 汇聚点自增），
+            // 倒计时以它而非 generated_at 变化作为重置终点——手动刷新在 304 / watcher 缓存
+            // 命中（generated_at 不变）时也立即回到完整周期。
+            h(RefreshCountdown, {
+              generatedAt: b.generated_at,
+              refreshSignal: refreshCycle,
+              intervalSec: refreshIntervalSec,
+              onTriggerRefresh: load,
+            })),
           // ===== g-352：工具条六项 —— 装得下平铺 / 装不下（或 <480px）收进「⋯ 工具」弹层 =====
           // 折叠判据 = 断点档（<480px，shouldCollapseToolbar）**或**头部实测自然宽度超过可用宽度
           //（toolbarCollapsedByFit）⇒ 头部始终单行，绝不把按钮压成竖排。
@@ -2870,9 +2983,10 @@
           // g-352 att-003 第 3 项：窄档（<480px，仅右侧栏实例）主管区重排为单行 + 图标按钮 + 隐藏模型 id
           ? h(SupervisorBar, { id: b.supervisorSession, statusLine: b.supervisorStatus ?? null, statusAt: b.supervisorStatusAt ?? null, narrow: narrowActive })
           : null,
-        // [v0.28] 问题 19：任务执行板 —— .dg-head 工具行下方、泳道区上方的可折叠子代理看板
-        //（默认收起；展开后 10 秒轮询 /api/dsh-graph/agents；只读展示 + 批量发消息，不侵入看板数据流）
-        h(AgentsBoard, { workspace: activeWs }),
+        // [v0.29] 问题 2：任务执行板（🛰）已从看板**移出**（v0.28 曾是头部下方的内嵌一行）。
+        // 本轮起它是 dsh-graph 面板自己的一个页签（conversation.view 注册 id "dsh-graph-agents"，
+        // 见 plugin.js）+ DSH 侧边栏入口（右侧栏页签，同一 id）；本处不再内嵌，避免两处重复。
+        // 组件本体（AgentsBoard / AgentsBoardView）与数据通道仍在，供两处注册复用。
         // g-127/g-156/g-164：折叠时对应列窄化为 36px（blocked 和 deliver 独立折叠），
         // 列模板统一由 gridCols 按当前折叠状态动态计算，与 released 泳道网格保持一致
         h("div", { style: { ...S.grid, gridTemplateColumns: gridCols } },
@@ -3220,7 +3334,8 @@
                 // g-177: 重命名按钮移到版本标题右边（跟 goal 卡片交互一致：标题行内小 ✏️）
                 h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 12, flexWrap: "wrap" } },
                   h("span", { style: { fontWeight: 700, fontSize: 15 } }, isDefaultGroup(versionDetailTarget.slug)
-                    ? "📁 分组：" + versionDetailTarget.name
+                    // [v0.29] 问题 8：常驻分组详情弹窗标题去掉 📁 前缀（原「📁 分组：X」→「分组：X」）
+                    ? "分组：" + versionDetailTarget.name
                     : dgT("versionDetail.title") + "：" + versionDetailTarget.name),
                   h("button", {
                     style: { ...S.btn, fontSize: 11, padding: "1px 6px", opacity: 0.7, display: isDefaultGroup(versionDetailTarget.slug) ? "none" : undefined }, className: "dg-btn",
@@ -3504,6 +3619,21 @@
                   }, dgT("common.cancel"))),
                 createVersionNote ? h("div", { style: { ...S.meta, marginTop: 8 } }, createVersionNote) : null))
           : null,
+        // [v0.29] 问题 8：「创建功能」弹窗（常驻功能分组：名称 + 作用域）——复用看板既有
+        // modal 样式与 backdrop 守卫；成功后提示「已创建常驻分组：X（全局/工作区）」并强制刷新看板。
+        showCreateGroup
+          ? h(CreateGroupModal, {
+              key: "dg-create-group-modal",
+              workspace: activeWs,
+              guard: createGroupGuard,
+              onClose: () => setShowCreateGroup(false),
+              onCreated: (name, scope) => {
+                showToast("已创建常驻分组：" + name + "（" + (scope === "global" ? "全局" : "工作区") + "）");
+                forceFreshRef.current = true;
+                load();
+              },
+            })
+          : null,
         // g-134: 重命名版本泳道弹窗
         renameVersionTarget
           ? dgOverlay({ style: S.overlay, ...renameVersionGuard },
@@ -3671,9 +3801,16 @@
     // 轮询：展开时 10s；收起时不轮询（仅挂载/工作区变化时拉一次，供收起行的「在线数」）。
     // [v0.28] i18n-keep(category-a)：本组件新增的用户可见文案按要求直接使用中文（不新增 i18n 词条）。
     // 控件显式配色（不使用 var(--dsw-alias-*)：本机主题下别名会解析成白色 ⇒ 白底白字）。
+    // [v0.29] 问题 2：本组件自本轮起**不再内嵌于看板**，而是由 plugin.js 在两处注册共用：
+    //   ① conversation.view 页签（id "dsh-graph-agents"，标签「任务执行板」）；
+    //   ② DSH 右侧栏页签（id/kind "dsh-graph-agents"）。
+    //   variant="tab" ⇒ 默认展开、不渲染折叠开关、卡片更宽，并附
+    //   session id / parent_session_id / started_at / detached 四个明细字段（页签形态更详细）；
+    //   看板内嵌形态（不传 variant，v0.28 语义）保留默认收起 + 折叠开关（向后兼容）。
     function AgentsBoard(props) {
       const workspace = props.workspace;
-      const [open, setOpen] = React.useState(false); // 默认收起
+      const tabMode = props?.variant === "tab";
+      const [open, setOpen] = React.useState(tabMode); // 默认收起（页签形态默认展开）
       const [agents, setAgents] = React.useState(null); // null = 尚未加载
       const [err, setErr] = React.useState(null);
       const [selected, setSelected] = React.useState(() => new Set()); // child_id 集合
@@ -3740,7 +3877,8 @@
           key,
           className: "dg-agents-card",
           "data-agents-child-id": childId || undefined,
-          style: { minWidth: 0, flex: "0 1 320px", border: "1px solid rgba(140,145,155,.35)", borderRadius: 6, padding: "6px 8px", background: "rgba(128,128,128,.07)", display: "flex", flexDirection: "column", gap: 3 },
+          // [v0.29] 问题 2：页签形态卡片更宽（0 1 320px → 1 1 460px）；看板内嵌形态尺寸不变。
+          style: { minWidth: 0, flex: tabMode ? "1 1 460px" : "0 1 320px", border: "1px solid rgba(140,145,155,.35)", borderRadius: 6, padding: "6px 8px", background: "rgba(128,128,128,.07)", display: "flex", flexDirection: "column", gap: 3 },
         },
           h("div", { style: { display: "flex", alignItems: "center", gap: 6, minWidth: 0 } },
             h("input", {
@@ -3766,6 +3904,15 @@
             h("span", null, "tokens：" + (a?.tokens != null ? String(a.tokens) : "—")),
             h("span", null, "ctx：" + (a?.ctx_pct != null ? String(a.ctx_pct) + "%" : "—")),
             a?.session_id ? h("span", { style: { opacity: 0.6, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "sid " + String(a.session_id).slice(0, 10) + "…") : null),
+          // [v0.29] 问题 2：页签/侧边栏形态追加明细列（session id / parent_session_id /
+          // started_at / detached）——比看板内嵌形态更详细；字段缺失一律显示「—」。
+          tabMode
+            ? h("div", { style: { fontSize: 11, opacity: 0.8, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
+                h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "session id：" + (a?.session_id ?? "—")),
+                h("span", null, "parent：" + (a?.parent_session_id ?? "—")),
+                h("span", null, "started：" + (a?.started_at ?? "—")),
+                h("span", null, "detached：" + (a?.detached === true ? "是" : a?.detached === false ? "否" : "—")))
+            : null,
           outputOpen.has(childId) && childId
             ? h(LiveStrip, { parentId: a.parent_session_id ?? null, childId })
             : null);
@@ -3776,15 +3923,18 @@
         style: { marginBottom: 8, border: "1px solid rgba(140,145,155,.35)", borderRadius: 6, background: "rgba(128,128,128,.05)", padding: "4px 10px 6px" },
       },
         h("div", {
-          style: { display: "flex", alignItems: "center", gap: 8, minHeight: 24, cursor: "pointer", userSelect: "none", flexWrap: "wrap" },
-          onClick: () => setOpen((v) => !v),
+          style: { display: "flex", alignItems: "center", gap: 8, minHeight: 24, cursor: tabMode ? "default" : "pointer", userSelect: "none", flexWrap: "wrap" },
+          onClick: tabMode ? undefined : () => setOpen((v) => !v),
         },
-          h("strong", { style: { fontSize: 12, whiteSpace: "nowrap" } }, (open ? "▾" : "▸") + " 🛰 任务执行板"),
+          h("strong", { style: { fontSize: 12, whiteSpace: "nowrap" } }, (tabMode ? "" : (open ? "▾" : "▸")) + " 🛰 任务执行板"),
           h("span", { style: { fontSize: 11, opacity: 0.9, whiteSpace: "nowrap" } },
             !workspace ? "（工作区未确定）" : agents == null ? "（读取中…）" : ("运行中 " + runningCount + " / 共 " + agents.length)),
           h("span", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-            "当前工作区子代理会话一览；展开后 10 秒自动刷新，可勾选多张卡批量发送消息"),
-          h("button", {
+            tabMode
+              ? "当前工作区子代理会话一览；10 秒自动刷新，可勾选多张卡批量发送消息（明细含 session/parent/started/detached）"
+              : "当前工作区子代理会话一览；展开后 10 秒自动刷新，可勾选多张卡批量发送消息"),
+          // [v0.29] 问题 2：页签形态不提供折叠开关（它就是这个页签的全部内容，收起等于空白页）
+          tabMode ? null : h("button", {
             className: "dg-btn", style: { ...AB_BTN, marginLeft: 4 },
             title: open ? "收起任务执行板" : "展开任务执行板",
             onClick: (e) => { e.stopPropagation(); setOpen((v) => !v); },
@@ -3824,6 +3974,99 @@
           parentId: p.parentId, childId: p.childId, goal: p.goal, text: p.text,
           onReceipt, onDone: onSendDone,
         })));
+    }
+
+    // [v0.29] 问题 2：任务执行板页签/侧边栏入口的**宿主包装组件**（工厂作用域；plugin.js 在
+    // conversation.view 与 sidebar.right.pane.tab 两处注册都渲染它 → 同一份实现、同一数据源）。
+    // 会话作用域 seat 的 props 带 sessionId ⇒ 用 resolveWorkspaceOfSession 解析工作区（与 KanbanView
+    // 同一条解析链，不新增第二条），解析不到时给出可读提示而不渲染空板。
+    // 内部仍是 AgentsBoard（variant="tab"）：10s 轮询、↗ 转到对话、多选发消息、LiveStrip 输出全部保留。
+    function AgentsBoardView(props) {
+      const ws = resolveWorkspaceOfSession(props?.sessionId) ?? null;
+      return h("div", {
+        className: "dg-agents-tab",
+        "data-dsh-agents-tab": "",
+        style: { padding: "8px 10px", minWidth: 0, display: "flex", flexDirection: "column", gap: 6 },
+      },
+        !ws
+          ? h("div", { style: { fontSize: 12, opacity: 0.75 } }, "（未确定工作区，无法读取任务执行板）")
+          : h(AgentsBoard, { workspace: ws, variant: "tab" }));
+    }
+
+    // [v0.29] 问题 8：「创建功能」弹窗（常驻功能分组：名称 + 作用域）——复用看板既有 modal
+    // 样式（dgOverlay + S.overlay/S.modal/S.btn/S.promptInput），不新建第二套弹窗实现。
+    // 提交 POST /api/dsh-graph/create-group {name, scope, workspace}
+    //（后端契约见 dsh-graph-host/index.js：scope 只认 "global"/"workspace"，其余按 workspace；
+    //  workspace 同时进 body 与 query，两条解析路径都不落空）。
+    // 组件提到工厂作用域：既被 KanbanView 内联渲染，也可被测试脚手架单独驱动（断言请求体）。
+    function CreateGroupModal(props) {
+      const [name, setName] = React.useState("");
+      const [scope, setScope] = React.useState("workspace");
+      const [note, setNote] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const submit = () => {
+        const n = String(name ?? "").trim();
+        const ws = props?.workspace ?? null;
+        if (!n) { setNote("请填写分组名称"); return; }
+        if (!ws) { setNote("未确定工作区，无法创建分组"); return; }
+        const url = graphUrl("/api/dsh-graph/create-group", {}, ws);
+        if (!url) { setNote("未确定工作区，无法创建分组"); return; }
+        setBusy(true); setNote(null);
+        fetch(url, {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: n, scope, workspace: ws }),
+        })
+          .then((r) => r.json().then((d) => ({ ok: r.ok, d })).catch(() => ({ ok: r.ok, d: {} })))
+          // [v0.29] i18n-keep(category-a)：结果提示（含后端 error）为中文
+          .then(({ ok, d }) => {
+            if (!ok || !d?.ok) { setNote("创建失败：" + (d?.error ?? "未知错误")); return; }
+            props.onCreated?.(d.name ?? n, d.scope ?? scope);
+            props.onClose?.();
+          })
+          .catch((e) => setNote("创建失败：" + String(e?.message ?? e)))
+          .finally(() => setBusy(false));
+      };
+      return dgOverlay({ style: S.overlay, ...(props?.guard ?? {}) },
+        h("div", { style: S.modal, onClick: (e) => e.stopPropagation() },
+          h("span", { style: S.close, onClick: () => props.onClose?.() }, "✕"),
+          h("div", { style: { fontWeight: 700, fontSize: 15, marginBottom: 12 } }, "创建功能"),
+          h("div", { style: { marginBottom: 8 } },
+            h("label", { style: { display: "block", marginBottom: 4, fontWeight: 600 } }, "名称"),
+            h("input", {
+              className: "dg-create-group-name",
+              style: { ...S.promptInput, width: "100%" },
+              value: name,
+              placeholder: "例如：风控 / 移动端 / 数据管道",
+              onChange: (e) => setName(e.target.value),
+              onKeyDown: (e) => { if (e.key === "Enter") submit(); },
+            })),
+          h("div", { style: { marginBottom: 8 } },
+            h("label", { style: { display: "block", marginBottom: 4, fontWeight: 600 } }, "作用域"),
+            h("select", {
+              className: "dg-create-group-scope",
+              style: { ...S.promptInput, width: "100%" },
+              value: scope,
+              onChange: (e) => setScope(e.target.value),
+            },
+              h("option", { value: "workspace", style: { background: "#20222a", color: "#e6e6e6" } }, "工作区（仅当前工作区）"),
+              h("option", { value: "global", style: { background: "#20222a", color: "#e6e6e6" } }, "全局（所有工作区）"))),
+          // [v0.29] i18n-keep(category-a)：帮助文字（className 必须是 dg-hint，受「无提示模式」统一隐藏）
+          h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, marginBottom: 10 } },
+            "常驻功能分组：每个工作区都有、不可删除、可设职责提示词，与版本无关。"),
+          h("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
+            h("button", {
+              className: "dg-btn dg-create-group-submit",
+              style: { ...S.btn, padding: "6px 16px", fontSize: 13 },
+              disabled: busy,
+              onClick: submit,
+            }, busy ? "创建中…" : "创建"),
+            h("button", {
+              className: "dg-btn",
+              style: { ...S.btn, padding: "6px 12px", fontSize: 12 },
+              onClick: () => props.onClose?.(),
+            }, "取消")),
+          note ? h("div", { style: { ...S.meta, marginTop: 8 } }, note) : null));
     }
 
     // [v0.28] 任务执行板「发送到所选会话」的逐卡执行器：挂载即绑定该子代理会话

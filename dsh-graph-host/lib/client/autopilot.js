@@ -291,7 +291,7 @@ function AutopilotPanel(props) {
   const btnPrimary = { ...btn, background: "#3b7ddd", borderColor: "#3b7ddd", color: "#fff" };
   const chip = { fontSize: 11, borderRadius: 5, padding: "1px 6px", background: "rgba(120,125,135,.28)", color: "inherit" };
   const input = { flex: 1, minWidth: 160, borderRadius: 6, border: "1px solid rgba(140,145,155,.5)", background: "rgba(20,22,27,.55)", color: "inherit", padding: "3px 8px", fontSize: 12 };
-  const runner = st?.runner ?? null;
+  // [v0.29] runner 快照随执行状态行一并移除（面板不再渲染跑动状态细字；跑动状态只在泳道行头 ▶/■ 表达）
   const recs = st?.recommendations ?? [];
   const pickedIdxs = Object.keys(picked).filter((k) => picked[k]).map(Number);
   // 推荐卡类型 → 粗左边框色（与看板卡片视觉约定一致）
@@ -336,6 +336,41 @@ function AutopilotPanel(props) {
     "data-autopilot-panel": "",
     style: { display: "flex", flexDirection: "column", gap: 8, margin: "14px 0 10px", padding: "10px 12px", borderRadius: 10, border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", background: "var(--dsw-alias-fill-tsp-primary, rgba(128,128,128,.06))", fontSize: 12 },
   },
+    // —— [v0.29] 🌐 托管（问题 4）：主功能 → 提到面板**最上面**，包一层显眼容器 ——
+    // 显式色背景 + 蓝色左边框 + 加粗放大标题 + 两个 checkbox 之间留距；勾选态整块加高亮描边。
+    // 容器内保留两条 dg-hint 说明（走 apHint → 无提示模式下自动隐藏）。
+    h("div", {
+      "data-ap-steward": "",
+      style: {
+        display: "flex", flexDirection: "column", gap: 6,
+        padding: "8px 10px", borderRadius: 8,
+        background: "rgba(59,125,221,.12)",
+        borderLeft: "3px solid #3b7ddd",
+        ...((mgr?.steward?.enabled || mgr?.advanceMode) ? { outline: "1px solid rgba(59,125,221,.8)", outlineOffset: 1 } : {}),
+      },
+    },
+      h("div", { style: { display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" } },
+        h("strong", { style: { flexShrink: 0, fontSize: 14, fontWeight: 800, color: "#2f6fd0" } }, "🌐 托管"),
+        h("label", { style: { display: "inline-flex", gap: 6, alignItems: "center", fontWeight: 600, cursor: "pointer" } },
+          h("input", {
+            type: "checkbox", checked: !!mgr?.steward?.enabled,
+            title: "全局托管：自动扫描/采纳/起跑并处理阻塞，持续不停（勾选即生效）",
+            onChange: (e) => mgrSet({ steward: { enabled: e.target.checked } }),
+          }),
+          "全局托管（自动扫描/采纳/起跑，持续不停）",
+        ),
+        h("label", { style: { display: "inline-flex", gap: 6, alignItems: "center", fontWeight: 600, cursor: "pointer" } },
+          h("input", {
+            type: "checkbox", checked: !!mgr?.advanceMode,
+            title: "目标推进：不加新任务，把非草稿任务全部推到交付（勾选即生效）",
+            onChange: (e) => mgrSet({ advanceMode: e.target.checked }),
+          }),
+          "目标推进（不加新任务，推进到全部交付）",
+        ),
+      ),
+      apHint("🌐 全局托管：勾选后自动扫描/采纳/起跑并处理阻塞，持续不停、永不自动停；取消勾选即回到手动操作。"),
+      apHint("🌐 目标推进：勾选后不加新任务，只把非草稿任务全部推进到交付；取消勾选即恢复常规托管行为。"),
+    ),
     // —— 推荐行（标准卡片，可拖进泳道）—— [v0.28] 问题20修复：折叠只隐藏**推荐卡片网格**，
     // 标题行 + 全部操作按钮（含输入框）保持常显；折叠态标题显示「💡 推荐（已收起）· N 条」。
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
@@ -437,26 +472,9 @@ function AutopilotPanel(props) {
         h("span", { style: chip }, st?.state?.autoPreset ? "自动选预设：开" : "自动选预设：关"),
       ),
     ),
-    // —— [v0.27] 执行状态行（原「▶ 行执行」整行已删：启停由泳道行头 ▶/■ 承担；runner 快照保留在此细字行）——
-    // 评审下拉并非重复功能（行头没有），故随 runner 快照一起挪到这一行，避免丢失唯一入口。
-    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", padding: "0 0 0 14px", fontSize: 11 } },
-      runner
-        ? h("span", { style: chip }, `执行中: ${runner.version} · 当前 ${runner.current ?? "—"} · 待办 ${(runner.pending ?? []).length} · 完成 ${(runner.done ?? []).length}${(runner.failed ?? []).length ? " · 失败 " + runner.failed.length : ""}${runner.paused ? " · ⏸ " + runner.paused : ""}`)
-        : h("span", { style: { opacity: 0.6 } }, "▶ 当前未在运行"),
-      h("span", { className: "dg-hint" }, runner ? "（在泳道行头点绿色「■」即可中断）" : "（在泳道行头点灰色「▶」启动本行自动驾驶）"),
-      // [v0.18] 评审模式：默认机审（机器门禁后自动裁决）；切到人审则停在「确认」等人
-      h("span", { style: chip }, "评审"),
-      h("select", {
-        style: { ...input, flex: "0 0 auto", minWidth: 92, fontSize: 11, padding: "1px 6px" },
-        value: st?.state?.reviewMode ?? "auto",
-        disabled: !!busy,
-        title: "机审=机器门禁通过即自动裁决（默认）；人审=停在确认列等负责人裁决",
-        onChange: (e) => mgrSet({ reviewMode: e.target.value }).then(load),
-      },
-        h("option", { value: "auto" }, "机审（默认）"),
-        h("option", { value: "human" }, "人审"),
-      ),
-    ),
+    // —— [v0.29] 执行状态细字行 + 评审下拉**整体删除**（问题 3）——
+    // 评审模式已在看板设置里；跑动状态由泳道行头的 ▶/■ 表达。这里不再保留任何细字行或孤立文案
+    // （不能只留空行/「▶ 当前未在运行」孤立提示）。
     // —— 归档行 ——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "🗄 归档"),
@@ -472,29 +490,9 @@ function AutopilotPanel(props) {
     ),
     // [v0.27] 「⚙ 高级」（无提示模式 + 按泳道选模型）已整体迁至看板设置（问题 16/23）；
     // noHints/laneDraft 状态与相关 setter 随块删除，apApplyNoHints/apNoHintsOn/apHint 机制函数保留。
-    // —— [v0.28] 🌐 托管 / 目标推进（面板开关行）——
-    // 数据契约：POST /api/dsh-graph-autopilot/manager {action:"set", steward:{enabled}|advanceMode}；读回 get 的 steward?.enabled 与 advanceMode。
-    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
-      h("strong", { style: { flexShrink: 0 } }, "🌐 托管"),
-      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
-        h("input", {
-          type: "checkbox", checked: !!mgr?.steward?.enabled,
-          title: "全局托管：自动扫描/采纳/起跑并处理阻塞，持续不停（勾选即生效）",
-          onChange: (e) => mgrSet({ steward: { enabled: e.target.checked } }),
-        }),
-        "全局托管（自动扫描/采纳/起跑，持续不停）",
-      ),
-      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
-        h("input", {
-          type: "checkbox", checked: !!mgr?.advanceMode,
-          title: "目标推进：不加新任务，把非草稿任务全部推到交付（勾选即生效）",
-          onChange: (e) => mgrSet({ advanceMode: e.target.checked }),
-        }),
-        "目标推进（不加新任务，推进到全部交付）",
-      ),
-    ),
-    apHint("🌐 全局托管：勾选后自动扫描/采纳/起跑并处理阻塞，持续不停、永不自动停；取消勾选即回到手动操作。"),
-    apHint("🌐 目标推进：勾选后不加新任务，只把非草稿任务全部推进到交付；取消勾选即恢复常规托管行为。"),
+    // —— [v0.29] 🌐 托管 / 目标推进（面板开关行）已提到面板最上面并包进显眼容器（问题 4）；
+    // 原地不再留任何占位文案。数据契约不变：POST /api/dsh-graph-autopilot/manager
+    // {action:"set", steward:{enabled}|advanceMode}；读回 get 的 steward?.enabled 与 advanceMode。
     // —— [v0.18] AI 推荐管理员（独立上行文；实时管理推荐 / 全局目标 / 全局提示词）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "🤖 推荐管理"),
@@ -639,7 +637,11 @@ function apLaneShell(opts) {
   const bodyEl = collapsed ? null : h("div", {
     key: key + "-body",
     ...(dropProps ? { onDragOver: dropProps.onDragOver, onDrop: dropProps.onDrop } : {}),
-    style: { gridColumn: fullWidth ? "1 / -1" : "2 / -1", display: "flex", flexDirection: "column", gap: 8, minWidth: 0, padding: "8px 10px", borderRadius: 8, background: "rgba(128,128,128,.04)" },
+    style: {
+      gridColumn: fullWidth ? "1 / -1" : "2 / -1", display: "flex", flexDirection: "column", gap: 8, minWidth: 0, padding: "8px 10px", borderRadius: 8, background: "rgba(128,128,128,.04)",
+      // [v0.29] 内容区同样呈现拖拽悬停高亮（与标签行一致），让落点一眼可见
+      ...(dropProps && dropProps._active ? { background: "rgba(76,141,255,.12)", outline: "1px dashed rgba(76,141,255,.6)" } : {}),
+    },
   }, ...(children ?? []));
   return h(React.Fragment, null, labelEl, bodyEl);
 }
@@ -658,6 +660,8 @@ function TemplateLane(props) {
   const [msg, setMsg] = React.useState("");
   const [collapsed, setCollapsed] = React.useState(true); // 默认折叠：不占位置
   const [refreshing, setRefreshing] = React.useState(false);
+  // [v0.29] 问题 9：本行现在也承接**看板卡片**拖入（卡片拖拽由看板 React 状态驱动，不是 apDragPick）
+  const [goalHover, setGoalHover] = React.useState(false);
 
   const load = React.useCallback((silent) => {
     if (!workspace) return;
@@ -724,6 +728,33 @@ function TemplateLane(props) {
       .finally(() => setBusy(false));
   };
 
+  // [v0.29] 问题 9：把任意**看板任务卡片**拖到「模板」行 → 生成模板。
+  // props 契约（调用方在 kanban.js 接上）：h(TemplateLane, { workspace, fullWidth, anyDrag, dragGoalId, onDropGoal })。
+  // anyDrag 为真 = 看板正拖着一张卡片；dragGoalId = 被拖卡片的 goalId。
+  // 缺 props（anyDrag 为空）时不挂任何落点 → 行为完全不变。
+  const goalDrag = !!props?.anyDrag;
+  const dragGoalId = props?.dragGoalId ?? null;
+  const dropGoalToTemplate = () => {
+    if (!dragGoalId) { setMsg("❌ 没拿到被拖拽任务的 id"); return; }
+    if (typeof props?.onDropGoal !== "function") { setMsg("❌ 未接入 onDropGoal（调用方未连接）"); return; }
+    props.onDropGoal(dragGoalId); // 由调用方负责请求与刷新
+    setMsg("✅ 已由任务生成模板（管理 AI 会把它通用化）");
+  };
+  const goalDropProps = goalDrag ? {
+    _active: goalHover,
+    onDragOver: (e) => {
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = "copy"; } catch { /* 旧引擎 */ }
+      if (collapsed) setCollapsed(false); // 展开以便看到结果提示（与回收站行一致）
+      if (!goalHover) setGoalHover(true);
+    },
+    onDrop: (e) => {
+      e.preventDefault();
+      setGoalHover(false);
+      dropGoalToTemplate();
+    },
+  } : undefined;
+
   const btn = AP_ROW_BTN;
   const btnPrimary = { ...btn, background: "var(--dsw-alias-button-primary-fill, rgba(76,141,255,.9))", color: "#fff", borderColor: "transparent" };
   const chip = AP_ROW_CHIP;
@@ -769,7 +800,9 @@ function TemplateLane(props) {
     onRefresh: () => load(false),
     refreshing,
     fullWidth: !!props?.fullWidth,
-    hint: "可折叠（默认折叠，省位置）；展开后每 10 秒自动刷新；卡片可拖到任意泳道建目标",
+    hint: "可折叠（默认折叠，省位置）；展开后每 10 秒自动刷新；模板卡可拖到任意泳道建目标，看板任务卡拖到本行可生成模板",
+    // [v0.29] 问题 9：承接看板卡片拖入 → 生成模板（无 props 时 undefined，行为不变）
+    dropProps: goalDropProps,
     actions: [
       h("button", {
         key: "new", style: btn, disabled: !!busy,
@@ -793,7 +826,8 @@ function TemplateLane(props) {
           msg && h("span", { style: { color: "#e05a5a", fontSize: 11 } }, msg),
         ),
       ),
-      !form && msg && h("div", { key: "msg", style: { color: "#e05a5a", fontSize: 11 } }, msg),
+      // [v0.29] 颜色按成败区分（成功=绿）：新增的「已由任务生成模板」提示需要绿色回显
+      !form && msg && h("div", { key: "msg", style: { fontSize: 11, color: msg.indexOf("❌") === 0 ? "#e05a5a" : "#3ecf8e" } }, msg),
       cards,
     ],
   });
@@ -928,6 +962,53 @@ function TrashLane(props) {
       .finally(() => setBusy(""));
   };
 
+  // [v0.29] 问题 5：一键把「已归档的目标」全部撤回草稿（后端 action:"restore-all-draft"）
+  const restoreAllDraft = () => {
+    setBusy("restore-all-draft"); setMsg("");
+    fetch("/api/dsh-graph-autopilot/trash", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "restore-all-draft" }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { setMsg("❌ " + (d?.error ?? "全部撤回失败")); return; }
+        setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
+        // 返回条数防御式读取：可能是数字、数组或计数别名
+        const countOf = (v) => (Array.isArray(v) ? v.length : typeof v === "number" ? v : v == null ? 0 : 1);
+        const doneN = countOf(d?.restored ?? d?.restoredGoals ?? d?.restoredCount ?? d?.count);
+        const failN = countOf(d?.failed ?? d?.failedGoals ?? d?.failedCount);
+        setMsg("✅ 已撤回草稿 " + doneN + " 项" + (failN ? "，失败 " + failN + " 项" : ""));
+        window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { restored: d?.restored } }));
+        window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setBusy(""));
+  };
+
+  // [v0.29] 问题 1（P1）：堆叠只对「回收站里真实存在」的条目才有意义。
+  // 服务器可能把已恢复/已彻底删除的条目继续留在 stack.items 里 → 出现空堆叠、或只剩裸 id 的堆叠。
+  // 这里按当前回收站数据过滤：剔掉不存在的成员；过滤后不足 2 项的堆叠当作不存在（不渲染）。
+  const goalIds = new Set((data.goals ?? []).map((g) => String(g.id)));
+  const versionKeys = new Set();
+  for (const v of (data.versions ?? [])) for (const k of [v.dir, v.slug, v.name]) if (k) versionKeys.add(String(k));
+  const memberAlive = (it) => !!it && (it.kind === "version" ? versionKeys.has(String(it.key)) : goalIds.has(String(it.key)));
+  const goalTitleOf = (key) => { const g = (data.goals ?? []).find((x) => String(x.id) === String(key)); return g ? g.title : null; };
+  const versionNameOf = (key) => { const v = (data.versions ?? []).find((x) => [x.dir, x.slug, x.name].some((k) => k != null && String(k) === String(key))); return v ? v.name : null; };
+  // 成员显示「标题（id）」；查不到标题再退化为裸 id
+  const memberLabel = (it) => (it.kind === "version" ? (versionNameOf(it.key) ?? it.key) : (goalTitleOf(it.key) ?? it.key));
+  /** 过滤掉已不在回收站的成员；不足 2 项 → null（该堆叠视作不存在） */
+  const liveMembers = (s) => { const kept = (s.items ?? []).filter(memberAlive); return kept.length >= 2 ? kept : null; };
+  /** 展示名：旧数据把卡片标题当堆叠名（与成员标题重合）→ 改用描述名；用户自定义名则原样保留 */
+  const stackTitle = (s, members) => {
+    const stored = String(s.name ?? "").trim();
+    const looksLikeCardTitle = stored && members.some((m) => String(memberLabel(m)) === stored);
+    if (stored && !looksLikeCardTitle) return stored;
+    const label = members.length > 0 ? String(memberLabel(members[0])) : "";
+    return "堆叠 " + members.length + " 项" + (label ? " · " + label.slice(0, 8) : "");
+  };
+  const liveStacks = (data.stacks ?? []).map((s) => ({ s, members: liveMembers(s) })).filter((x) => x.members);
+
   const total = data.goals.length + data.versions.length;
   const children = [
     data.versions.length > 0 && h("div", { key: "v", style: { display: "flex", flexDirection: "column", gap: 4 } },
@@ -952,7 +1033,15 @@ function TrashLane(props) {
           ),
         )))),
     data.goals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
-      h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已归档的目标（恢复后回到原泳道）"),
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+        h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已归档的目标（恢复后回到原泳道）"),
+        // [v0.29] 问题 5：一次性把全部已归档目标撤回「草稿」泳道
+        h("button", {
+          style: AP_ROW_BTN, disabled: !!busy,
+          title: "把回收站里所有已归档目标一次性撤回「草稿」泳道",
+          onClick: () => restoreAllDraft(),
+        }, busy === "restore-all-draft" ? "…" : "↩ 全部撤回草稿"),
+      ),
       h("div", { style: { display: "flex", flexWrap: "wrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
         data.goals.map((g) => h("div", {
           key: g.id,
@@ -971,11 +1060,29 @@ function TrashLane(props) {
             e.preventDefault(); e.stopPropagation();
             const src = apTrashDragKey;
             apTrashDragKey = null;
+            const keyOf = (it) => it.kind + ":" + String(it.key);
+            const tgt = { kind: "goal", key: g.id };
+            const seed = [src, tgt]; // 被拖的条目在前（堆叠名取首个成员标题）
+            // [v0.29] 问题 1：若目标条目已属于某个堆叠（或新成员与已有堆叠有交集）→ 把两者并集交给后端去重，
+            // 避免出现两个成员高度重叠 / 同名的堆叠。
+            const merged = [];
+            for (const s of (data.stacks ?? [])) {
+              // 只并入「仍在回收站里」的成员，别把幽灵成员带进新堆叠
+              const its = (Array.isArray(s.items) ? s.items : []).filter(memberAlive);
+              if (its.some((it) => seed.some((x) => keyOf(x) === keyOf(it)))) merged.push(...its);
+            }
+            merged.push(...seed);
+            const seen = new Set();
+            const items = merged.filter((it) => { const k = keyOf(it); if (seen.has(k)) return false; seen.add(k); return true; });
+            // [v0.29] 名字不再用卡片标题（原来两个堆叠都叫被拖到的卡片标题如「迭代优化」）
+            const first = items.find((it) => it.kind === "goal") ?? items[0];
+            const firstTitle = first ? (goalTitleOf(first.key) ?? first.key) : "";
+            const name = "堆叠 " + items.length + " 项" + (firstTitle ? " · " + String(firstTitle).slice(0, 8) : "");
             setBusy("stack"); setMsg("");
             fetch("/api/dsh-graph-autopilot/trash", {
               method: "POST", credentials: "same-origin",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ workspace, action: "stack", name: g.title, items: [src, { kind: "goal", key: g.id }] }),
+              body: JSON.stringify({ workspace, action: "stack", name, items }),
             })
               .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
               .then(({ ok, d }) => {
@@ -1009,20 +1116,23 @@ function TrashLane(props) {
           ),
         )))),
     // [v0.25] 堆叠：拖条目到另一条上即成一堆；用原生 details 展开（无需额外状态），可「散开」
-    (data.stacks ?? []).length > 0 && h("div", { key: "stacks", style: { display: "flex", flexDirection: "column", gap: 4 } },
+    // [v0.29] 问题 1：只渲染**过滤后仍 ≥2 项**的堆叠（成员已不在回收站的堆叠直接当作不存在）
+    liveStacks.length > 0 && h("div", { key: "stacks", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7 } }, "堆叠（把一条拖到另一条上即可成堆；点标题展开，点「散开」拆开）"),
       h("div", { style: { display: "flex", flexWrap: "wrap", gap: 8 } },
-        (data.stacks ?? []).map((s) => h("details", {
+        liveStacks.map(({ s, members }) => h("details", {
           key: s.id,
           style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "6px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #8a8f98", fontSize: 12, minWidth: 200 },
         },
           h("summary", { style: { cursor: "pointer", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
-            h("b", null, "🧱 " + s.name),
-            h("span", { style: AP_ROW_CHIP }, (s.items?.length ?? 0) + " 项"),
+            // [v0.29] 问题 1：不再用卡片标题当堆叠名；成员数按过滤后的真实条目计
+            h("b", null, "🧱 " + stackTitle(s, members)),
+            h("span", { style: AP_ROW_CHIP }, members.length + " 项"),
           ),
           h("div", { style: { display: "flex", flexDirection: "column", gap: 2, margin: "6px 0 2px 4px" } },
-            (s.items ?? []).map((it) => h("div", { key: it.kind + ":" + it.key, style: { fontSize: 11, opacity: 0.9 } },
-              `${it.kind === "version" ? "🏷️ " : ""}${it.key}`)),
+            // [v0.29] 问题 1：成员行显示「标题（id）」，查不到标题再退化为 id
+            members.map((it) => h("div", { key: it.kind + ":" + it.key, style: { fontSize: 11, opacity: 0.9 } },
+              `${it.kind === "version" ? "🏷️ " : ""}${memberLabel(it)}（${it.key}）`)),
           ),
           h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
             h("button", {

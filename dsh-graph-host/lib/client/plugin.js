@@ -237,6 +237,13 @@
     // 外部插件可能已占用朴素名 graph/kanban/context，故两者都用包名 "dsh-graph"。
     const SIDEBAR_TAB_ID = "dsh-graph";
     const SIDEBAR_TAB_KIND = "dsh-graph";
+    // [v0.29] 问题 2：任务执行板（🛰）—— 与看板同构的**第二组注册**：conversation.view 页签
+    //（与看板同处「对话/轨迹/…/任务台」那一排）＋ DSH 侧边栏入口（右侧栏页签）。
+    // id / kind 同样带包名命名空间（registry 对重复 id 与同 band 的 kind 冲突会抛异常）。
+    const AGENTS_TAB_ID = "dsh-graph-agents";
+    const AGENTS_TAB_KIND = "dsh-graph-agents";
+    // guide 胶囊位置排在宿主内置 Files（10）与看板（SIDEBAR_GUIDE_ORDER=20）之后。
+    const AGENTS_GUIDE_ORDER = 21;
     // guide 胶囊的位置：排在宿主内置 Files 条目（order 10）之后，与 dsh-context（order 20）一致。
     const SIDEBAR_GUIDE_ORDER = 20;
     // 右侧栏页签的字形（看板列）。currentColor + 透明度分层，自动跟随宿主主题；
@@ -262,6 +269,29 @@
         h("span", {
           style: { paddingRight: 30, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
         }, dgT("sidebar.tab.title")));
+    }
+    // [v0.29] 问题 2：任务执行板页签的字形（广播/卫星：实心点 + 两道弧）——与 GraphTabIcon 同款
+    // 自带 svg（currentColor + 透明度分层，跟随宿主主题），不依赖 primitives 的图标导出面。
+    function AgentsTabIcon({ size = 16, className }) {
+      return h("svg", {
+        width: size, height: size, viewBox: "0 0 16 16", fill: "none", className,
+        "aria-hidden": "true", xmlns: "http://www.w3.org/2000/svg",
+        style: { flex: "none" },
+      },
+        h("circle", { cx: 8, cy: 8, r: 2.4, fill: "currentColor" }),
+        h("path", { d: "M8 2.6A5.4 5.4 0 0 1 13.4 8", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round", fill: "none", opacity: 0.75 }),
+        h("path", { d: "M8 13.4A5.4 5.4 0 0 1 2.6 8", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round", fill: "none", opacity: 0.5 }));
+    }
+    // chip 标题 seat：图标 + 文案（结构/间距与 GraphTabTitle 逐字同款，含 dockkit 的 30px 渐隐预留）。
+    // i18n-keep(category-a)：本页签文案按要求直接使用中文（不新增 i18n 词条；看板页签仍走 dgT）。
+    function AgentsTabTitle() {
+      // 切语言时重算（与 GraphTabTitle 同一订阅机制，保持两处行为一致）。
+      useLocaleRevision();
+      return h(React.Fragment, null,
+        h(AgentsTabIcon, { size: 16 }),
+        h("span", {
+          style: { paddingRight: 30, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+        }, "任务执行板"));
     }
     return {
       name: "dsh-graph",
@@ -309,6 +339,23 @@
               label: () => dgT("board.title"),
             },
             (props) => h(KanbanView, props),
+          ),
+        );
+        // [v0.29] 问题 2：任务执行板页签 —— 与看板同处 conversation.view 页签行（「对话/轨迹/记忆/
+        // 上下文/任务台/…」那一排），标签「任务执行板」，order=81（紧随看板）。
+        // 渲染 AgentsBoardView（工厂作用域；内部就是 v0.28 的 AgentsBoard，variant="tab"）：
+        // 同一份 10s 轮询数据通道、同一套「↗ 转到对话 / 多选发消息 / LiveStrip 输出」能力；
+        // 看板内已**不再内嵌**该行（避免两处重复）。
+        // i18n-keep(category-a)：本页签标签按要求直接使用中文（不新增 i18n 词条）。
+        ctx.slots.inject("conversation.view", () =>
+          ctx.slots.register(
+            {
+              name: "conversation.view",
+              id: AGENTS_TAB_ID,
+              order: 81,
+              label: () => "任务执行板",
+            },
+            (props) => h(AgentsBoardView, props),
           ),
         );
         // g-133：注册「看板设置」settings.section 页（profile 级全局默认配置）。
@@ -382,6 +429,61 @@
         } catch (e) {
           // i18n-keep(category-a)：开发者控制台诊断日志（console.warn），非 UI 文案。
           console.warn("[dsh-graph-host] sidebarRight deferred inject 失败（右侧栏无该页签）", e);
+        }
+        // ===== [v0.29] 问题 2：任务执行板 —— DSH 侧边栏（右侧栏）入口 =====
+        // 与看板 chip 同一套两段式注册（tabs.register 类型 + 两个 slot seat），但**独立 try/catch**：
+        // 两枚页签各自失败互不牵连（id/kind 被占时只丢自己那一枚）。特性探测口径与看板 chip 一致
+        //（宿主无 sidebarRightTabs ⇒ 回调不触发 ⇒ 不注册、不 pend、不报错，会话内页签与看板不受影响）。
+        // 不需要额外的 section 声明文件：dsh.client.inject 已含 @deepseek-ai/dsh-client-ui-sidebar-right
+        //（dsh-graph-host/package.json），同一 band 内再加一枚 tab 类型无需改声明。
+        try {
+          ctx.inject?.(["sidebarRightTabs"], (injected) => {
+            const scope = injected ?? {};
+            const disposers = [];
+            const own = (result) => { if (typeof result === "function") disposers.push(result); };
+            const disposeAll = () => {
+              for (const d of disposers) { try { d(); } catch { /* 静默 */ } }
+            };
+            try {
+              const tabs = scope.sidebarRightTabs;
+              const sidebarSlots = scope.slots ?? ctx.slots;
+              if (!tabs || typeof tabs.register !== "function") return;
+              if (!sidebarSlots || typeof sidebarSlots.register !== "function") return;
+              own(tabs.register({
+                id: AGENTS_TAB_ID,
+                kind: AGENTS_TAB_KIND,
+                // i18n-keep(category-a)：本页签文案为中文（thunk 形式保留，便于将来接 i18n 词条）
+                title: () => "任务执行板",
+                guide: [{
+                  id: AGENTS_TAB_ID,
+                  order: AGENTS_GUIDE_ORDER,
+                  title: () => "任务执行板",
+                  description: () => "查看本工作区执行子代理：运行状态、模型/tokens、输出流与批量发消息",
+                  icon: AgentsTabIcon,
+                }],
+              }));
+              // 本体 seat：与 conversation.view 页签渲染**同一个** AgentsBoardView（同一实现/同一数据源）
+              own(sidebarSlots.inject("sidebar.right.pane.tab", () => sidebarSlots.register(
+                { name: "sidebar.right.pane.tab", key: AGENTS_TAB_ID, locale: "dsh-graph" },
+                (props) => h(AgentsBoardView, { ...props, host: "sidebar" }),
+              )));
+              // chip 标题 seat
+              own(sidebarSlots.inject("sidebar.right.pane.tab.title", () => sidebarSlots.register(
+                { name: "sidebar.right.pane.tab.title", key: AGENTS_TAB_ID },
+                (props) => h(AgentsTabTitle, props),
+              )));
+            } catch (e) {
+              // 撤销已成功的部分注册；只影响这一枚页签，看板 chip 不受牵连。
+              disposeAll();
+              // i18n-keep(category-a)：开发者控制台诊断日志（console.warn），非 UI 文案。
+              console.warn("[dsh-graph-host] sidebarRight（任务执行板）注册失败，已撤销", e);
+              return;
+            }
+            return disposeAll;
+          });
+        } catch (e) {
+          // i18n-keep(category-a)：开发者控制台诊断日志（console.warn），非 UI 文案。
+          console.warn("[dsh-graph-host] sidebarRight（任务执行板）deferred inject 失败", e);
         }
         console.log("[dsh-graph-host] client apply: kanban view registered (i18n enabled)");
       },

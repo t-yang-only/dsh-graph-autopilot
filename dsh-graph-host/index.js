@@ -193,6 +193,10 @@ import {
   setLanePrompt,
   lanePromptFor,
   restoreGoalToDraft,
+  // [v0.29] 问题 5：归档一键撤回（批量，逐个 try/catch，单个失败不中断整批）
+  restoreAllArchivedToDraft,
+  // [v0.29] 问题 9：由既有目标生成通用模板（读 meta+body → templates.json）
+  createTemplateFromGoal,
   // [v0.27] 问题 22：带附件目标强制回草稿（目录形态保留 cards/attempts）
   moveGoalToDraftForce,
   listBlockedGoals,
@@ -3064,7 +3068,12 @@ export function apply(ctx, config) {
           const body = req.method === "POST" ? await readBody(req) : {};
           const r = rootForReq(req, body);
           const out = collectAttemptAgents(r);
-          json(res, 200, { ok: true, workspace: dirname(r), graph_root: r, ...out });
+          // [v0.29] 问题 7：有子进程在跑的目标清单（live==="running" 的行，按 goal 去重；既有字段一律不变）
+          const runningGoals = [];
+          for (const a of out.agents) {
+            if (a.live === "running" && !runningGoals.includes(a.goal)) runningGoals.push(a.goal);
+          }
+          json(res, 200, { ok: true, workspace: dirname(r), graph_root: r, ...out, running_goals: runningGoals });
         } catch (e) {
           const code = e instanceof GraphError ? 400 : 500;
           json(res, code, { error: String(e?.message ?? e) });
@@ -5484,6 +5493,20 @@ export function apply(ctx, config) {
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },
       },
+      // [v0.29] 问题 9：由既有目标生成通用模板（读该目标 meta + body → templates.json；不消耗、可反复建目标）
+      {
+        path: "/api/dsh-graph-autopilot/template-from-goal",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            if (!body.goal) return json(res, 400, { error: "missing goal" });
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const out = createTemplateFromGoal(root, String(body.goal), { name: body.name ?? null }, "human:gui");
+            json(res, 200, { ok: true, template: out.template, templates: listTemplates(root) });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
       {
         path: "/api/dsh-graph-autopilot/template-apply",
         handler: async (req, res) => {
@@ -5525,6 +5548,15 @@ export function apply(ctx, config) {
               if (!body.goal) return json(res, 400, { error: "missing goal" });
               const r = restoreGoalToDraft(root, String(body.goal), "human:gui");
               return json(res, 200, { ok: true, restored: r.id, to: "backlog", ...listTrash(root) });
+            }
+            // [v0.29] 问题 5：归档一键撤回（批量）——所有已归档目标（或 body.goals 指定的一批）逐个回草稿；
+            // 单个失败只进 failed 数组，绝不中断整批。
+            if (action === "restore-all-draft") {
+              const out = restoreAllArchivedToDraft(root, {
+                goals: Array.isArray(body.goals) ? body.goals : null,
+                actor: "human:gui",
+              });
+              return json(res, 200, { ok: true, restored: out.restored, failed: out.failed, ...listTrash(root) });
             }
             // [v0.25] 堆叠：把多条回收站条目堆成一格 / 散开
             if (action === "stack") {

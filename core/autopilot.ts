@@ -630,6 +630,53 @@ export function saveTemplate(
   return tpl;
 }
 
+/** [v0.29] 问题 9：抹掉描述里的具体指代（目标 id / attempt id 等机器 id），保留原有结构与行文。
+ *  只删「像 id 的 token」，不做改写、不做概括；删除后清理行内多余空白与行尾空白。 */
+function stripGoalRefs(text: string, goalId: string): string {
+  let t = String(text ?? "");
+  const gid = String(goalId ?? "").trim();
+  if (gid) t = t.split(gid).join("");
+  t = t
+    .replace(/\bg-\d{1,6}(?![\w\u4e00-\u9fff])/g, "")
+    .replace(/\batt-\d{1,6}(?![\w\u4e00-\u9fff])/g, "");
+  return t
+    .split("\n")
+    .map((line) => line.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+$/, ""))
+    .join("\n")
+    .trim();
+}
+
+/**
+ * [v0.29] 问题 9：由既有目标生成一条**通用模板**（读该目标 meta + body）。
+ *  - title = 传入 name，或 `${类型}：${标题}`（类型取 meta.type 归一化后的机器值，与看板类型徽标同源）；
+ *  - description = 原「目标描述」去掉目标 id / attempt id 等具体指代（保留结构与行文）；
+ *  - criteria = 原判据原样保留（与 criteriaItemsOf 同口径：去 HTML 注释、按行 trim）；
+ *  - tags 仅作为生成时的输入参考（模板结构不含 tags 字段），不写入 templates.json；
+ *  - 落盘复用 saveTemplate（templates.json 唯一落盘路径），返回 {ok, template}。
+ */
+export function createTemplateFromGoal(
+  root: string,
+  goalId: string,
+  opts: { name?: string | null } = {},
+  actor: string,
+): { ok: true; template: GoalTemplate } {
+  const gid = String(goalId ?? "").trim();
+  if (!gid) throw new GraphError("missing goal");
+  const doc = loadGoal(findGoalFile(root, gid));
+  const type = normalizeGoalType(doc.meta.type);
+  const title = String(doc.meta.title ?? "").trim() || gid;
+  const name = String(opts?.name ?? "").trim();
+  const description = stripGoalRefs(sectionText(doc.body, "目标描述"), gid);
+  const criteria = criteriaItemsOf(root, gid);
+  const template = saveTemplate(
+    root,
+    { id: null, title: name || `${type}：${title}`, type, description, criteria },
+    actor,
+  );
+  appendEvent(root, { actor, event: "autopilot.template_from_goal", details: { goal: gid, template: template.id } });
+  return { ok: true, template };
+}
+
 export function deleteTemplate(root: string, id: string, actor: string): { ok: true; id: string } {
   const list = readTemplatesFile(root);
   const next = list.filter((t) => t.id !== id);
@@ -1579,11 +1626,17 @@ export function linkGates(root: string, goal: string): { blockedBy: GoalLink[]; 
 // ---------------------------------------------------------------------------
 export const DEFAULT_GROUPS: { slug: string; name: string; prompt: string }[] = [
   { slug: "interaction", name: "交互", prompt: "交互分组：负责界面与交互逻辑（页面、组件、用户操作路径、空态/加载态/错误态）。" },
-  { slug: "deploy-test", name: "部署测试", prompt: "部署测试分组：负责构建产物发布到测试环境、冒烟验证、版本号记录与回滚方案。" },
+  // [v0.29] 问题 8：显示名由「部署测试」归一为「部署」（slug 不变，旧数据原地兼容）。
+  { slug: "deploy-test", name: "部署", prompt: "部署分组：负责构建产物发布到测试环境、冒烟验证、版本号记录与回滚方案。" },
   { slug: "backend", name: "后端", prompt: "后端分组：负责服务端接口与数据层（参数校验、错误码、必要日志、接口兼容性说明）。" },
 ];
 
 export const DEFAULT_GROUP_SLUGS: string[] = DEFAULT_GROUPS.map((g) => g.slug);
+
+/** [v0.29] 问题 8：旧默认分组显示名 → 现名。仅在 version.md 的 name 仍是**旧值**时归一（用户自定义名一律不动）。 */
+const LEGACY_GROUP_NAMES: Record<string, string> = {
+  "deploy-test": "部署测试",
+};
 
 export function isDefaultGroup(slug: unknown): boolean {
   return DEFAULT_GROUP_SLUGS.includes(String(slug ?? "").trim());
@@ -1789,10 +1842,34 @@ export function createGroup(
 }
 
 /**
+ * [v0.29] 问题 8：把既有分组目录的显示名从旧默认名归一为新默认名。
+ * 只在 `versions/<slug>/version.md` 的 name **仍是旧值**时改写（用户自定义名绝不覆盖），
+ * 单个分组失败不影响其它分组与看板数据。
+ */
+export function normalizeGroupNames(root: string, actor = "system:autopilot"): { renamed: string[] } {
+  const renamed: string[] = [];
+  for (const g of DEFAULT_GROUPS) {
+    const legacy = LEGACY_GROUP_NAMES[g.slug];
+    if (!legacy) continue;
+    const vfile = join(root, "versions", g.slug, "version.md");
+    if (!existsSync(vfile)) continue;
+    try {
+      const doc = loadGoal(vfile);
+      if (String(doc.meta?.name ?? "") !== legacy) continue; // 已是新名 / 用户自定义名 → 不动
+      doc.meta.name = g.name;
+      saveGoal(vfile, doc);
+      renamed.push(g.slug);
+      appendEvent(root, { actor, event: "autopilot.group_renamed", details: { slug: g.slug, from: legacy, to: g.name } });
+    } catch { /* 单个分组归一失败不影响其它分组 */ }
+  }
+  return { renamed };
+}
+
+/**
  * 自愈创建：保证本工作区一定存在这些常驻分组（内置三条 + 自建定义），缺目录/version.md 就补建，
  * 缺职责提示词就补默认。只补缺，绝不覆盖已有内容。返回本次实际创建/补种的 slug。
  */
-export function ensureGroups(root: string, actor = "system:autopilot"): { created: string[]; promptsSeeded: string[] } {
+export function ensureGroups(root: string, actor = "system:autopilot"): { created: string[]; promptsSeeded: string[]; renamed: string[] } {
   const created: string[] = [];
   const promptsSeeded: string[] = [];
   for (const g of DEFAULT_GROUPS) materializeGroup(root, { slug: g.slug, name: g.name, prompt: g.prompt }, actor, created, promptsSeeded);
@@ -1805,7 +1882,9 @@ export function ensureGroups(root: string, actor = "system:autopilot"): { create
       materializeGroup(root, { slug: g.slug, name: g.name, prompt: g.prompt }, actor, created, promptsSeeded);
     } catch { /* 单个分组物化失败不影响看板数据 */ }
   }
-  return { created, promptsSeeded };
+  // [v0.29] 问题 8：旧默认显示名（如「部署测试」）随自愈归一为新名（自定义名不动）
+  const { renamed } = normalizeGroupNames(root, actor);
+  return { created, promptsSeeded, renamed };
 }
 
 // ---------------------------------------------------------------------------
@@ -1888,6 +1967,57 @@ export function restoreGoalToDraft(root: string, id: string, actor: string): { o
     throw new GraphError(`已取消归档，但无法移入草稿：${(e as any)?.message ?? e}（带 cards/attempts 附件的目标不能平铺进草稿，可先恢复到原泳道或独立目标）`);
   }
   return { ok: true, id: gid };
+}
+
+/**
+ * [v0.29] 问题 5：归档一键撤回（批量）——把已归档目标逐个回草稿。
+ *  - goals 为空/不传/空数组 → 全部已归档目标（listArchived 的顺序）；传了一批 id → 只处理这一批；
+ *    批内某个 id 不在归档清单里（已恢复 / 不存在）如实记为 failed，不静默丢弃。
+ *  - 单个目标先走 restoreGoalToDraft；带 cards/attempts 附件时它会在「已取消归档」后失败，
+ *    此时退回「restoreGoalToLane（取消归档，保持原泳道）+ moveGoalToDraftForce」那条路，
+ *    附件目录随目标整体迁入 backlog/<id>/goal.md。
+ *  - 逐个 try/catch：**单个失败绝不中断整批**。
+ */
+export function restoreAllArchivedToDraft(
+  root: string,
+  opts: { goals?: string[] | null; actor: string },
+): { ok: true; restored: string[]; failed: { id: string; error: string }[] } {
+  const actor = opts?.actor ?? "system:autopilot";
+  const archived = listArchived(root);
+  const known = new Map(archived.map((g) => [g.id, g]));
+  // 空数组等价于「全部」（避免客户端传 [] 时静默什么都不做）
+  const raw = Array.isArray(opts?.goals) ? (opts!.goals as unknown[]).map((g) => String(g ?? "").trim()).filter(Boolean) : [];
+  const want = raw.length > 0 ? raw : null;
+  const targets = want ? want.filter((id) => known.has(id)) : archived.map((g) => g.id);
+  const restored: string[] = [];
+  const failed: { id: string; error: string }[] = [];
+  if (want) {
+    for (const id of want) {
+      if (!known.has(id)) failed.push({ id, error: "不在已归档目标清单中（可能已恢复或 id 不存在）" });
+    }
+  }
+  for (const id of targets) {
+    try {
+      restoreGoalToDraft(root, id, actor);
+      restored.push(id);
+      continue;
+    } catch {
+      try {
+        // force 路径自带「未归档则先取消归档」，这里再补一次 restoreGoalToLane 仅为兜底
+        try { restoreGoalToLane(root, id, { version: null, actor }); } catch { /* 上一步多半已取消归档 */ }
+        moveGoalToDraftForce(root, id, { actor });
+        restored.push(id);
+      } catch (e2) {
+        failed.push({ id, error: String((e2 as any)?.message ?? e2) });
+      }
+    }
+  }
+  appendEvent(root, {
+    actor,
+    event: "autopilot.trash_restore_all",
+    details: { requested: want ? want.length : archived.length, restored: restored.length, failed: failed.length },
+  });
+  return { ok: true, restored, failed };
 }
 
 /**
