@@ -1232,6 +1232,106 @@ export function listBlockedGoals(root: string): { id: string; title: string; rea
 }
 
 // ---------------------------------------------------------------------------
+// [v0.22] 任务连线（阶段行画布）：任务块分首尾——前=开始连接、后=结束连接、中间=实时协作连接
+// ---------------------------------------------------------------------------
+export const LINKS_FILE = "autopilot-links.json";
+
+export interface GoalLink {
+  id: string;
+  from: string;
+  to: string;
+  /** start=开始（A 完成后 B 才开始）｜end=结束（B 收尾依赖 A）｜mid=实时协作（双向同步） */
+  kind: "start" | "end" | "mid";
+  note?: string | null;
+  created_at: string;
+  created_by: string;
+}
+
+function normLinkKind(k: unknown): GoalLink["kind"] {
+  const v = String(k ?? "").trim();
+  return v === "start" || v === "end" || v === "mid" ? v : "mid";
+}
+
+function readLinksFile(root: string): GoalLink[] {
+  const file = join(root, LINKS_FILE);
+  if (!existsSync(file)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((l: any) => l && l.from && l.to)
+      .map((l: any) => ({
+        id: String(l.id ?? `${l.from}->${l.to}:${l.kind}`),
+        from: String(l.from),
+        to: String(l.to),
+        kind: normLinkKind(l.kind),
+        note: l.note ?? null,
+        created_at: String(l.created_at ?? ""),
+        created_by: String(l.created_by ?? ""),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function writeLinksFile(root: string, list: GoalLink[]): void {
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, LINKS_FILE), JSON.stringify(list, null, 2) + "\n", "utf8");
+}
+
+export function listLinks(root: string, goal?: string | null): GoalLink[] {
+  const all = readLinksFile(root);
+  const g = String(goal ?? "").trim();
+  return g ? all.filter((l) => l.from === g || l.to === g) : all;
+}
+
+export function addLink(
+  root: string,
+  input: { from: string; to: string; kind?: string; note?: string | null },
+  actor: string,
+): { ok: true; link: GoalLink; created: boolean } {
+  const from = String(input?.from ?? "").trim();
+  const to = String(input?.to ?? "").trim();
+  if (!from || !to) throw new GraphError("连线需要 from 与 to（目标 id）");
+  if (from === to) throw new GraphError("不能把目标连到自己");
+  const kind = normLinkKind(input.kind);
+  const list = readLinksFile(root);
+  const hit = list.find((l) => l.from === from && l.to === to && l.kind === kind);
+  if (hit) return { ok: true, link: hit, created: false };
+  const link: GoalLink = {
+    id: `${from}->${to}:${kind}:${Date.now().toString(36)}`,
+    from,
+    to,
+    kind,
+    note: input.note ? String(input.note).slice(0, 500) : null,
+    created_at: new Date().toISOString(),
+    created_by: actor,
+  };
+  list.push(link);
+  writeLinksFile(root, list);
+  appendEvent(root, { actor, event: "autopilot.link_added", details: { from, to, kind } });
+  return { ok: true, link, created: true };
+}
+
+export function removeLink(root: string, id: string, actor: string): { ok: true; removed: string } {
+  const list = readLinksFile(root);
+  const next = list.filter((l) => l.id !== id);
+  if (next.length === list.length) throw new GraphError(`连线不存在：${id}`);
+  writeLinksFile(root, next);
+  appendEvent(root, { actor, event: "autopilot.link_removed", details: { id } });
+  return { ok: true, removed: id };
+}
+
+/** 某目标的连线依赖（供派发前检查：start 连接要求前置目标已交付）。 */
+export function linkGates(root: string, goal: string): { blockedBy: GoalLink[]; note: GoalLink[] } {
+  const all = listLinks(root);
+  return {
+    blockedBy: all.filter((l) => l.to === goal && l.kind !== "mid"),
+    note: all.filter((l) => (l.from === goal || l.to === goal) && l.kind === "mid"),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // [v0.20] 判据打勾的服务端持久化（确认列自动裁决的判据来源：客户端勾选 → 写回 meta）
 // ---------------------------------------------------------------------------
 export function setCriteriaChecked(

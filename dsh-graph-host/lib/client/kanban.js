@@ -3544,6 +3544,8 @@
           : null,
         // [autopilot-fork] 自动驾驶面板（看板底部）：推荐卡片（可拖进泳道）+ 全局目标/提示词 + 行执行 ▶ + 归档
         h(AutopilotPanel, { workspace: activeWs }),
+        // [v0.22] 任务连线画布（fixed 覆盖层：连线/橡皮擦 + 三种连接类型）
+        h(LinksLayer, { key: "links-layer", workspace: activeWs }),
       );
     }
 

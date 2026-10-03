@@ -913,7 +913,169 @@ function LanePromptEditor(props) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// [v0.22] 任务连线画布：任务块分首尾——点卡片**上部**=开始连接、**下部**=结束连接、**中部**=实时协作连接
+// 覆盖层用 fixed 定位 SVG（视口坐标），因此不依赖祖先定位；橡皮擦模式点线即删。
+// ---------------------------------------------------------------------------
+const AP_LINK_KINDS = {
+  start: { label: "开始连接", color: "#4c8dff", hint: "前者交付后后者才开始" },
+  end: { label: "结束连接", color: "#e0a53a", hint: "后者收尾依赖前者" },
+  mid: { label: "实时协作", color: "#3ecf8e", hint: "两者实时同步协作" },
+};
+
+function LinksLayer(props) {
+  const workspace = props?.workspace ?? null;
+  if (workspace) apPanelWorkspace = workspace;
+  const [links, setLinks] = React.useState([]);
+  const [mode, setMode] = React.useState("idle"); // idle | link | erase
+  const [pending, setPending] = React.useState(null); // { id, kind }
+  const [tick, setTick] = React.useState(0);
+  const [msg, setMsg] = React.useState("");
+
+  const load = React.useCallback(() => {
+    if (!workspace) return;
+    fetch("/api/dsh-graph-autopilot/links", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "list" }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.ok) setLinks(Array.isArray(d.links) ? d.links : []); })
+      .catch(() => {});
+  }, [workspace]);
+
+  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    const h = () => load();
+    window.addEventListener("autopilot:adopted", h);
+    window.addEventListener("autopilot:links-changed", h);
+    return () => { window.removeEventListener("autopilot:adopted", h); window.removeEventListener("autopilot:links-changed", h); };
+  }, [load]);
+  // 位置随滚动/尺寸变化重算（每 800ms + 滚动/缩放事件）
+  React.useEffect(() => {
+    const bump = () => setTick((t) => t + 1);
+    const t = setInterval(bump, 800);
+    window.addEventListener("scroll", bump, true);
+    window.addEventListener("resize", bump);
+    return () => { clearInterval(t); window.removeEventListener("scroll", bump, true); window.removeEventListener("resize", bump); };
+  }, []);
+  React.useEffect(() => { if (mode !== "link") setPending(null); }, [mode]);
+
+  const cardRect = (id) => {
+    const el = document.querySelector(`[data-goal-id="${id}"]`);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return null;
+    return r;
+  };
+  const anchor = (rect, kind, side) => {
+    if (!rect) return null;
+    if (kind === "start") return side === "from" ? { x: rect.left + rect.width / 2, y: rect.top } : { x: rect.left + rect.width / 2, y: rect.bottom };
+    if (kind === "end") return side === "from" ? { x: rect.left + rect.width / 2, y: rect.bottom } : { x: rect.left + rect.width / 2, y: rect.top };
+    return side === "from" ? { x: rect.right, y: rect.top + rect.height / 2 } : { x: rect.left, y: rect.top + rect.height / 2 };
+  };
+
+  const onClickCard = (e) => {
+    if (mode === "idle") return;
+    const card = e.target?.closest?.("[data-goal-id]");
+    if (!card) return;
+    const id = card.getAttribute("data-goal-id");
+    e.preventDefault();
+    e.stopPropagation();
+    if (mode === "erase") return;
+    const rect = card.getBoundingClientRect();
+    const rel = (e.clientY - rect.top) / Math.max(1, rect.height);
+    const kind = rel < 0.33 ? "start" : rel > 0.66 ? "end" : "mid";
+    if (!pending) { setPending({ id, kind }); setMsg(`起点 ${id}（${AP_LINK_KINDS[kind].label}）→ 再点终点`); return; }
+    if (pending.id === id) { setPending(null); setMsg("已取消起点选择"); return; }
+    const body = { workspace, action: "add", from: pending.id, to: id, kind: pending.kind };
+    fetch("/api/dsh-graph-autopilot/links", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { setMsg("❌ " + (d?.error ?? "连线失败")); return; }
+        setLinks(Array.isArray(d.links) ? d.links : []);
+        setMsg(`✅ 已建立 ${AP_LINK_KINDS[pending.kind].label}：${pending.id} → ${id}`);
+        window.dispatchEvent(new CustomEvent("autopilot:links-changed"));
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setPending(null));
+  };
+
+  const erase = (id, e) => {
+    e.stopPropagation();
+    fetch("/api/dsh-graph-autopilot/links", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "remove", id }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { setMsg("❌ " + (d?.error ?? "删除失败")); return; }
+        setLinks(Array.isArray(d.links) ? d.links : []);
+        setMsg("🧽 已擦除一条连线");
+        window.dispatchEvent(new CustomEvent("autopilot:links-changed"));
+      })
+      .catch(() => {});
+  };
+
+  if (!workspace) return null;
+
+  const paths = [];
+  for (const l of links) {
+    const a = anchor(cardRect(l.from), l.kind, "from");
+    const b = anchor(cardRect(l.to), l.kind, "to");
+    if (!a || !b) continue;
+    const c1 = { x: a.x, y: a.y + (l.kind === "start" ? -40 : l.kind === "end" ? 40 : 0) };
+    const c2 = { x: b.x, y: b.y + (l.kind === "start" ? 40 : l.kind === "end" ? -40 : 0) };
+    if (l.kind === "mid") { c1.x = a.x + 40; c2.x = b.x - 40; }
+    paths.push({ ...l, d: `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`, color: AP_LINK_KINDS[l.kind].color });
+  }
+
+  return h("div", {
+    "data-ap-links-layer": "",
+    style: { position: "fixed", inset: 0, zIndex: 6, pointerEvents: "none" },
+  },
+    h("svg", { width: "100%", height: "100%", style: { position: "absolute", inset: 0, pointerEvents: "none" } },
+      h("defs", null,
+        ...["start", "end", "mid"].map((k) => h("marker", {
+          key: k, id: "ap-arrow-" + k, viewBox: "0 0 10 10", refX: 9, refY: 5,
+          markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse",
+        }, h("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: AP_LINK_KINDS[k].color })))),
+      paths.map((p) => h("path", {
+        key: p.id,
+        d: p.d,
+        stroke: p.color,
+        strokeWidth: mode === "erase" ? 3 : 2,
+        strokeDasharray: p.kind === "mid" ? "6 4" : undefined,
+        fill: "none",
+        markerEnd: `url(#ap-arrow-${p.kind})`,
+        style: { pointerEvents: mode === "erase" ? "stroke" : "none", cursor: mode === "erase" ? "pointer" : "default" },
+        onClick: mode === "erase" ? (e) => erase(p.id, e) : undefined,
+      }, h("title", null, `${AP_LINK_KINDS[p.kind].label}：${p.from} → ${p.to}${mode === "erase" ? "（点此擦除）" : ""}`))),
+    ),
+    // 点击捕获层：连线模式下拦下卡片点击（注意只吞掉落在卡片上的点击）
+    mode === "idle" ? null : h("div", {
+      style: { position: "absolute", inset: 0, pointerEvents: mode === "erase" ? "none" : "auto", cursor: "crosshair" },
+      onClick: onClickCard,
+    }),
+    // 工具条
+    h("div", {
+      style: { position: "absolute", left: 12, bottom: 12, pointerEvents: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "6px 10px", borderRadius: 10, background: "rgba(20,22,27,.86)", border: "1px solid rgba(140,145,155,.45)", fontSize: 11 },
+    },
+      h("span", { style: { fontWeight: 700 } }, "🔗 任务连线"),
+      h("span", { style: AP_ROW_CHIP }, links.length + " 条"),
+      h("button", { style: mode === "link" ? AP_ROW_PRIMARY : AP_ROW_BTN, onClick: () => setMode(mode === "link" ? "idle" : "link") }, mode === "link" ? "✖ 退出连线" : "✏️ 连线"),
+      h("button", { style: mode === "erase" ? { ...AP_ROW_PRIMARY, background: "#c0392b", borderColor: "#c0392b" } : AP_ROW_BTN, onClick: () => setMode(mode === "erase" ? "idle" : "erase") }, mode === "erase" ? "✖ 退出擦除" : "🧽 橡皮擦"),
+      ...Object.entries(AP_LINK_KINDS).map(([k, v]) => h("span", { key: k, title: v.hint, style: { display: "inline-flex", gap: 4, alignItems: "center", opacity: 0.9 } },
+        h("span", { style: { width: 12, height: 3, borderRadius: 2, background: v.color, display: "inline-block" } }), v.label)),
+      mode === "link" ? h("span", { style: { opacity: 0.75 } }, "点卡片上部=开始／中部=协作／下部=结束") : null,
+      msg ? h("span", { style: { opacity: 0.9 } }, msg) : null,
+      h("button", { style: AP_ROW_BTN, onClick: () => load() }, "⟳ 刷新"),
+    ),
+  );
+}
+
 >>>ESM-EXPORTS-START>>>
 // 仅 node --test / 静态检查用；浏览器 bundle 由 build-client.sh 剥离本块。
-export { AutopilotPanel, TemplateLane, TrashLane, LanePromptEditor, apDragStart, apDragEnd, apAdoptIntoLane, apArchiveGoal };
+export { AutopilotPanel, TemplateLane, TrashLane, LanePromptEditor, LinksLayer, apDragStart, apDragEnd, apAdoptIntoLane, apArchiveGoal };
 <<<ESM-EXPORTS-END<<<

@@ -196,6 +196,10 @@ import {
   listRegistry,
   setCriteriaChecked,
   unmetCriteria,
+  listLinks,
+  addLink,
+  removeLink,
+  linkGates,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -4784,6 +4788,10 @@ export function apply(ctx, config) {
           text: { type: "string", description: "文本（提示词 / 协作消息 / 全局目标 / 全局提示词）" },
           goal: { type: "string" }, dir: { type: "string" }, version: { type: "string" },
           picks: { type: "array", items: "number" }, claims: { type: "array", items: "string" },
+          from: { type: "string", description: "连线起点目标 id" }, to: { type: "string", description: "连线终点目标 id" },
+          id: { type: "string", description: "连线 id（删除用）" },
+          kind: { type: "string", description: "连线类型：start=开始连接 / end=结束连接 / mid=实时协作连接" },
+          note: { type: "string", description: "连线备注" },
           reviewMode: { type: "string" }, managerPrompt: { type: "string" },
           managerEnabled: { type: "boolean" }, managerIntervalMin: { type: "number" },
           managerUpdateGlobals: { type: "boolean" }, confirm: { type: "boolean" },
@@ -4847,6 +4855,9 @@ export function apply(ctx, config) {
               void spawnChild("graph:rec-manager", prompt, { on: () => {} }, root, { role: "pm" });
               return { ok: true, started: true };
             }
+            case "links_list": return { ok: true, links: listLinks(root, a.goal ?? null) };
+            case "links_add": return { ok: true, ...addLink(root, { from: String(a.from ?? ""), to: String(a.to ?? ""), kind: a.kind, note: a.note ?? null }, autopilotActor(ex)) };
+            case "links_remove": return { ok: true, ...removeLink(root, String(a.id ?? ""), autopilotActor(ex)) };
             case "catalog_list": return { ok: true, home: resolveUserHome(), skills: listSkills(), presets: listAgentPresets() };
             case "status": {
               const st = readAutopilotState(root);
@@ -5080,6 +5091,29 @@ export function apply(ctx, config) {
             const skills = listSkills();
             const presets = listAgentPresets();
             json(res, 200, { ok: true, home: resolveUserHome(), skills, presets });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      // [v0.22] 任务连线（画布）：list / add / remove（任务块首尾连接与实时协作连接）
+      {
+        path: "/api/dsh-graph-autopilot/links",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const action = String(body.action ?? "list");
+            if (action === "list") return json(res, 200, { ok: true, links: listLinks(root, body.goal ?? null) });
+            if (action === "add") {
+              const out = addLink(root, { from: body.from, to: body.to, kind: body.kind, note: body.note }, "human:gui");
+              return json(res, 200, { ok: true, ...out, links: listLinks(root) });
+            }
+            if (action === "remove") {
+              if (!body.id) return json(res, 400, { error: "missing id" });
+              removeLink(root, String(body.id), "human:gui");
+              return json(res, 200, { ok: true, links: listLinks(root) });
+            }
+            return json(res, 400, { error: `未知 action：${action}` });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },
       },
