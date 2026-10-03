@@ -1977,7 +1977,8 @@ export function transition(
 /** 位置/归属一致性：backlog 与 goals/ 下 version 必须为 null；版本内必须等于目录名。 */function locationProblems(root: string, file: string, meta: Record<string, any>): string[] {
   const problems: string[] = [];
   const rel = file.slice(root.length + 1);
-  const parts = rel.split("/");
+  // [autopilot-fork] Windows 修复：路径分隔符归一（join 在 Windows 产出反斜杠，split("/") 解析失败）。
+  const parts = rel.replace(/\\/g, "/").split("/");
   const version = meta.version ?? null;
   if (parts[0] === "versions") {
     const dirVersion = parts[1];
@@ -7205,11 +7206,15 @@ export function moveGoal(
   }
   if (targetFile === file) return;
   if (existsSync(targetFile)) throw new GraphError(`目标位置已存在：${targetFile}`);
-  mkdirSync(dirname(targetFile), { recursive: true });
   if (srcDir && targetDirForm) {
+    // [autopilot-fork] Windows 修复：不能先创建「目标目录本身」再 rename 覆盖它 ——
+    // POSIX rename(2) 可覆盖空目录，Windows MoveFileEx 返回 ACCESS_DENIED（Node 报 EPERM），
+    // 且失败残留的空目标目录会让重试永久失败。只创建目标的父目录，让 rename 自己落地最后一级。
+    mkdirSync(dirname(dirname(targetFile)), { recursive: true });
     // 目录形态互转：整体移动目录（cards/ attempts/ 一起走）
     renameSync(srcDir, dirname(targetFile));
   } else {
+    mkdirSync(dirname(targetFile), { recursive: true });
     renameSync(file, targetFile);
     if (srcDir) {
       try {
@@ -7247,7 +7252,8 @@ export function archiveGoal(
   }
   const srcDir = basename(file) === "goal.md" ? dirname(file) : null;
   const rel = file.slice(root.length + 1);
-  const parts = rel.split("/");
+  // [autopilot-fork] Windows 修复：join 产出反斜杠，split("/") 会解析失败 → 统一归一为 "/"。
+  const parts = rel.replace(/\\/g, "/").split("/");
   let targetFile: string;
   if (parts[0] === "versions") {
     // 版本目标 → versions/vX/archived/<id>/goal.md
@@ -7269,11 +7275,13 @@ export function archiveGoal(
   if (existsSync(targetFile)) throw new GraphError(`归档位置已存在：${targetFile}`);
   // 标记已归档
   doc.meta.archived = true;
-  mkdirSync(dirname(targetFile), { recursive: true });
   if (srcDir) {
+    // [autopilot-fork] Windows 修复（同 moveGoal）：只建父目录，不预建目标目录本身。
+    mkdirSync(dirname(dirname(targetFile)), { recursive: true });
     // 目录形态：整体移动目录（cards/ attempts/ 一起走）
     renameSync(srcDir, dirname(targetFile));
   } else {
+    mkdirSync(dirname(targetFile), { recursive: true });
     renameSync(file, targetFile);
   }
   saveGoal(targetFile, doc);
@@ -7298,7 +7306,8 @@ export function unarchiveGoal(
     throw new GraphError(`目标 ${id} 未归档，无需取消归档`);
   }
   const rel = file.slice(root.length + 1);
-  const parts = rel.split("/");
+  // [autopilot-fork] Windows 修复：路径分隔符归一（join 在 Windows 产出反斜杠，split("/") 解析失败）。
+  const parts = rel.replace(/\\/g, "/").split("/");
   const srcDir = basename(file) === "goal.md" ? dirname(file) : null;
   let targetFile: string;
   if (parts[0] === "versions" && parts[1] === "archived") {
@@ -7326,11 +7335,13 @@ export function unarchiveGoal(
   if (existsSync(targetFile)) throw new GraphError(`恢复位置已存在：${targetFile}`);
   // 清除归档标记
   doc.meta.archived = false;
-  mkdirSync(dirname(targetFile), { recursive: true });
   if (srcDir) {
+    // [autopilot-fork] Windows 修复（同 moveGoal）：只建父目录，不预建目标目录本身。
+    mkdirSync(dirname(dirname(targetFile)), { recursive: true });
     // 目录形态：整体移动目录（cards/ attempts/ 一起走）
     renameSync(srcDir, dirname(targetFile));
   } else {
+    mkdirSync(dirname(targetFile), { recursive: true });
     renameSync(file, targetFile);
   }
   saveGoal(targetFile, doc);

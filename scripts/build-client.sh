@@ -22,6 +22,8 @@ PARTS=(
   "session-hooks"
   "live-panel"
   "supervisor-bar"
+  # [autopilot-fork] 自动驾驶面板（工厂作用域组件，kanban.js 渲染引用；必须在 drag-prompts 之前）
+  "autopilot"
   "card"
   "markdown"
   "card-drawer"

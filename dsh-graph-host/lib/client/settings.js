@@ -6,7 +6,12 @@
     // g-133：provider/model 由自由文本 input 改为合法目录 select——目录来自 ctx.get('connection').api
     // 的 llm.providers/llm.models（仅 advisory 可选列表，不拦截保存）；settings.yaml 已存但目录
     // 未列出的旧值保留为「已存值（当前目录未列出）」固定 option（不可自由编辑、可继续保存）。
-    const GRAPH_SETTINGS_NS = "dsh-graph";
+    // [autopilot-fork] ①：0.1.7 的设置文档按 Loader entry 的 id 寻址
+    // （dsh-settings/lib/index.js: `ns: entry.options.id`），
+    // 而本插件的 entry id 是 `dsh-graph-host`（见包内 cordis.patch.yml 的 insert 行）。
+    // 两个都作为候选探测，取哪个能拿到 ready 快照 —— 不再靠猜。
+    const GRAPH_SETTINGS_NS_CANDIDATES = ["dsh-graph-host", "dsh-graph"];
+    let GRAPH_SETTINGS_NS = GRAPH_SETTINGS_NS_CANDIDATES[0]; // 兜底/兼容旧路径；探测命中后会改写
     // plugin.js apply 里绑定后的 settings scope（从 ctx.settingsScope.bind 得到），组件经它读写。
     let gSettingsScope = null;
     // g-133：数据源 = ctx.get('connection').api（registerGraphSettingsSection 捕获），挂载时读 llm 目录。
@@ -60,9 +65,35 @@
 
     // 优先使用官方 settingsScope；memory scope 只提供本地空壳，必须改用 Host API。
     function bindGraphSettingsScope(ctx) {
+      // [autopilot-fork] ②：分步 try —— 原实现把三件事裹在同一个 try 里，
+      // 而 ctx.get("settingsScope") 在服务未注册时**会抛**，异常被最外层 catch
+      // 吞掉后回退分支永远不可达，于是整页降级。现在每层独立判定。
+      const isLive = (s) => s && typeof s.getSnapshot === "function" && s.getSnapshot()?.mode !== "memory";
+
+      // 路径 1：0.1.7 的 configForms（按 entry id 取共享表单）。
+      // 契约与 graph 期望的一致：getSnapshot / subscribe / set 都在。
+      for (const ns of GRAPH_SETTINGS_NS_CANDIDATES) {
+        try {
+          const forms = ctx?.get?.("configForms");
+          const form = forms && typeof forms.get === "function" ? forms.get(ns) : null;
+          if (isLive(form)) {
+            GRAPH_SETTINGS_NS = ns;
+            return (gSettingsScope = form);
+          }
+        } catch { /* 该候选不可用，试下一个 */ }
+      }
+
+      // 路径 2：老宿主（<=0.1.6）的 settingsScope。
       try {
-        const bound = ctx?.get?.("settingsScope")?.bind({ namespace: GRAPH_SETTINGS_NS });
-        if (bound && bound.getSnapshot?.().mode !== "memory") return (gSettingsScope = bound);
+        const scoped = ctx?.get?.("settingsScope");
+        const bound = scoped && typeof scoped.bind === "function"
+          ? scoped.bind({ namespace: GRAPH_SETTINGS_NS })
+          : null;
+        if (isLive(bound)) return (gSettingsScope = bound);
+      } catch { /* 服务不存在 —— 正常，继续回退 */ }
+
+      // 路径 3：直连 Host settings RPC（原有兜底，保持不变）。
+      try {
         const connection = ctx?.get?.("connection") ?? ctx?.connection;
         return (gSettingsScope = createGraphSettingsApiScope(connection?.api, ctx));
       } catch {

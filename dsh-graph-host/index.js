@@ -155,6 +155,19 @@ import {
   closeWatchers,
 } from "./core/ops.js";
 import { resolveRoot, resolveCanonicalRoot, _clearCanonicalRootCache } from "./core/root.js";
+// [autopilot-fork] 自动驾驶层（推荐 → 采纳 → 行执行器 → 归档；设计见 docs/autopilot.md）
+import {
+  readAutopilotState,
+  writeAutopilotState,
+  scanRecommendations,
+  saveRecommendations,
+  readRecommendations,
+  adoptRecommendations,
+  laneReadiness,
+  autoPresetFor,
+  listArchived,
+  listDelivered,
+} from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
 // g-133：接入 DSH profile 级用户设置（dsh-settings）。为避免在 @deepseek-ai/* 不可解析的上下文
@@ -4317,6 +4330,395 @@ export function apply(ctx, config) {
       pollSection();
     }
 
+    // ════════ [autopilot-fork] 自动驾驶层 ════════
+    // 行执行器：对一条版本泳道顺序执行 收集→执行→评审→交付；再次触发可中断。
+    // 评审语义由 reviewMode 决定：auto=机器裁决（automation=ai 全自动）；human=停在 review 等人。
+    // 全局提示词注入每个 attempt 的 attempt_brief；autoPreset 分析任务文本给出预设建议（advisory）。
+    const autopilotRunners = new Map(); // root -> runner
+    const autopilotLog = (msg) => process.stderr.write(`[dsh-graph-autopilot] ${msg}\n`);
+    const autopilotActor = (ex) => {
+      const sid = ex?.agent?.session?.id ?? ex?.agent?.id ?? null;
+      return sid ? `agent:${sid}` : "agent:unknown";
+    };
+    const autopilotRoot = (ex, wsOverride) => {
+      if (wsOverride && typeof wsOverride === "string" && wsOverride.trim()) {
+        const ws = resolve(wsOverride.trim());
+        const canonical = resolveCanonicalRoot(config, ws);
+        init(canonical.root);
+        return canonical.root;
+      }
+      const ws = ex?.agent?.session?.header?.cwd ?? ex?.agent?.session?.cwd ?? null;
+      if (ws && isAbsolute(ws)) {
+        const canonical = resolveCanonicalRoot(config, ws);
+        init(canonical.root);
+        return canonical.root;
+      }
+      return root; // 回落到宿主配置 root（与 REST 语义一致：无显式 workspace 用默认）
+    };
+
+    function autopilotFinish(root, r, reason) {
+      if (r.timer) clearTimeout(r.timer);
+      if (r.poll) clearInterval(r.poll);
+      autopilotRunners.delete(root);
+      appendEvent(root, { actor: "system:autopilot", event: "autopilot.lane_finished", details: { version: r.version, reason, done: r.done, failed: r.failed } });
+      autopilotLog(`泳道 ${r.version} 结束（${reason}）：完成 ${r.done.length}，失败 ${r.failed.length}`);
+    }
+
+    async function autopilotAdvance(root, how) {
+      const r = autopilotRunners.get(root);
+      if (!r || !r.current) return;
+      const id = r.current.goalId;
+      if (r.timer) clearTimeout(r.timer);
+      r.done.push(id);
+      appendEvent(root, { actor: "system:autopilot", event: "autopilot.goal_done", goal: id, details: { how, version: r.version } });
+      autopilotLog(`goal=${id} 完成（${how}），剩余 ${r.queue.length}`);
+      r.current = null;
+      await autopilotDispatchNext(root);
+    }
+
+    function autopilotFailCurrent(root, reason) {
+      const r = autopilotRunners.get(root);
+      if (!r || !r.current) return;
+      const id = r.current.goalId;
+      if (r.timer) clearTimeout(r.timer);
+      r.failed.push({ goal: id, reason });
+      appendEvent(root, { actor: "system:autopilot", event: "autopilot.goal_failed", goal: id, details: { reason, version: r.version } });
+      autopilotLog(`goal=${id} 失败：${reason}`);
+      r.current = null;
+    }
+
+    function autopilotTimeout(root) {
+      const r = autopilotRunners.get(root);
+      if (!r || !r.current) return;
+      try { r.current.controller?.abort(); } catch { /* 已结束 */ }
+      autopilotFailCurrent(root, "attempt 超时（45 分钟无收尾）");
+      if (r.stopped) { autopilotFinish(root, r, "stopped"); return; }
+      void autopilotDispatchNext(root);
+    }
+
+    function autopilotPoll(root) {
+      const r = autopilotRunners.get(root);
+      if (!r || !r.current || r.stopped) return;
+      const id = r.current.goalId;
+      let status = "";
+      try { status = String(loadGoal(findGoalFile(root, id)).meta.status ?? ""); } catch { return; }
+      if (status === "delivered") { void autopilotAdvance(root, "delivered"); return; }
+      if (status === "blocked") { autopilotFailCurrent(root, "执行器将目标置为 blocked"); if (r.stopped) autopilotFinish(root, r, "stopped"); else void autopilotDispatchNext(root); return; }
+      if (status === "review") {
+        if (r.reviewMode === "auto") {
+          try {
+            resolveAccept(root, id, { actor: "system:autopilot", verdict: "accept", force: true, reason: "autopilot 全自动评审（automation=ai + reviewMode:auto）" });
+            void autopilotAdvance(root, "auto-accepted");
+          } catch (e) {
+            autopilotFailCurrent(root, `自动裁决失败：${String(e?.message ?? e)}`);
+            if (r.stopped) autopilotFinish(root, r, "stopped"); else void autopilotDispatchNext(root);
+          }
+        } else {
+          appendEvent(root, { actor: "system:autopilot", event: "autopilot.awaiting_human", goal: id, details: { version: r.version } });
+          autopilotLog(`goal=${id} 进入 review，reviewMode=human —— 泳道暂停待人审`);
+          if (r.timer) clearTimeout(r.timer);
+          r.paused = "awaiting_human";
+        }
+      }
+      // in_progress：继续等（超时由 timer 兜底）
+    }
+
+    async function autopilotDispatchNext(root) {
+      const r = autopilotRunners.get(root);
+      if (!r || r.stopped || r.current || r.paused) return;
+      const nextId = r.queue.shift();
+      if (!nextId) { autopilotFinish(root, r, "queue-empty"); return; }
+      const st = readAutopilotState(root);
+      const controller = new AbortController();
+      r.current = { goalId: nextId, controller, startedAt: new Date().toISOString() };
+      let doc = null;
+      try { doc = loadGoal(findGoalFile(root, nextId)); } catch { /* 派发准入会给出权威错误 */ }
+      const briefParts = [];
+      if (st.globalPrompt) briefParts.push(`【全局提示词（最高优先级，必须遵循）】\n${st.globalPrompt}`);
+      if (st.autoPreset && doc) {
+        const preset = autoPresetFor(`${doc.meta.title ?? ""} ${doc.body ?? ""}`);
+        if (preset) briefParts.push(`【执行方式建议】本任务适合参考「${preset}」预设的专业方法执行（系统自动分析推荐；如有更合适的方式可自行判断）。`);
+      }
+      const { supervisorId, parent } = resolveSpawnParent(root);
+      try {
+        const res = await dispatchExecutionAttempt({
+          root,
+          workspace: dirname(root),
+          goal: nextId,
+          entrypoint: "tool",
+          actor: "system:autopilot",
+          executor: "agent:executor",
+          parentAgent: parent,
+          parentSessionId: supervisorId,
+          attempt_brief: briefParts.length ? briefParts.join("\n\n") : undefined,
+          signal: controller.signal,
+          force: false,
+        });
+        if (res?.child_id) {
+          r.current.childId = res.child_id;
+          r.timer = setTimeout(() => autopilotTimeout(root), 45 * 60 * 1000);
+          if (r.timer.unref) r.timer.unref();
+          autopilotLog(`attempt 已派发 goal=${nextId} child=${res.child_id}（队列剩余 ${r.queue.length}）`);
+        } else {
+          autopilotFailCurrent(root, `派发未产生子代理：${String(res?.child_error ?? "unknown")}`);
+          if (r.stopped) autopilotFinish(root, r, "stopped"); else void autopilotDispatchNext(root);
+        }
+      } catch (e) {
+        autopilotFailCurrent(root, String(e?.message ?? e));
+        if (r.stopped) autopilotFinish(root, r, "stopped"); else void autopilotDispatchNext(root);
+      }
+    }
+
+    function autopilotStart(root, version, reviewMode, actor) {
+      if (autopilotRunners.has(root)) throw new GraphError("该工作区已有执行中的泳道——先 autopilot_stop 再重新开始");
+      const plan = laneReadiness(root, version);
+      if (!plan.runnable.length) {
+        throw new GraphError(`泳道 ${version} 没有可派发目标。阻断明细：${plan.goals.filter((g) => g.blockers.length).map((g) => `${g.id}(${g.blockers.join("；")})`).join(" / ") || "无目标"}`);
+      }
+      const st = readAutopilotState(root);
+      const r = {
+        version, reviewMode: reviewMode ?? st.reviewMode ?? "auto",
+        queue: plan.runnable.slice(), current: null, done: [], failed: [],
+        stopped: false, paused: null, timer: null, poll: null,
+      };
+      autopilotRunners.set(root, r);
+      appendEvent(root, { actor: actor ?? "system:autopilot", event: "autopilot.lane_started", details: { version, queue: plan.runnable, reviewMode: r.reviewMode } });
+      autopilotStartPolling(root);
+      void autopilotDispatchNext(root);
+      return { version, queue: plan.runnable, reviewMode: r.reviewMode };
+    }
+
+    function autopilotStartPolling(root) {
+      const r = autopilotRunners.get(root);
+      if (!r || r.poll) return;
+      r.poll = setInterval(() => { try { autopilotPoll(root); } catch (e) { autopilotLog(`poll 异常：${e?.message ?? e}`); } }, 4000);
+      if (r.poll.unref) r.poll.unref();
+    }
+
+    function autopilotStop(root, actor) {
+      const r = autopilotRunners.get(root);
+      if (!r) return { ok: false, reason: "没有执行中的泳道" };
+      r.stopped = true;
+      try { r.current?.controller?.abort(); } catch { /* 已结束 */ }
+      if (r.timer) clearTimeout(r.timer);
+      if (r.poll) clearInterval(r.poll);
+      const snapshot = { version: r.version, done: r.done, failed: r.failed, pending: [r.current?.goalId, ...r.queue].filter(Boolean) };
+      autopilotRunners.delete(root);
+      appendEvent(root, { actor: actor ?? "system:autopilot", event: "autopilot.lane_stopped", details: snapshot });
+      return { ok: true, ...snapshot };
+    }
+
+    // —— 工具（agent 会话可调用） ——
+    const autopilotToolCommon = {
+      scan: {
+        name: "autopilot_scan_recommend",
+        description: "[autopilot] 扫描工作区产出推荐任务清单（git 未提交改动 / TODO 标记 / 测试基线缺口 / 全局目标拆解，与既有目标自动去重）。推荐清单落盘，可用 autopilot_adopt 采纳。",
+        parameters: params({ workspace: { type: "string", description: "工作区根目录；缺省用当前会话 cwd" } }, []),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const st = readAutopilotState(root);
+          const recs = scanRecommendations(root, { globalGoalText: st.globalGoal?.text ?? null });
+          saveRecommendations(root, recs, { actor: autopilotActor(ex) });
+          return { ok: true, count: recs.length, recommendations: recs };
+        },
+      },
+      adopt: {
+        name: "autopilot_adopt",
+        description: "[autopilot] 采纳推荐清单中的若干条（1-based 序号）落成真实目标：进 backlog 草稿或直接建入指定版本（判据同步写入并确认）。run=true 时立即开始该版本的自动驾驶。",
+        parameters: params({
+          picks: { type: "array", items: "number", description: "推荐序号（1-based）" },
+          version: { type: "string", description: "目标版本（如 V0.1）；缺省进 backlog 草稿；传 standalone 建独立目标" },
+          run: { type: "boolean", description: "采纳后立即自动驾驶该版本" },
+          workspace: { type: "string" },
+        }, ["picks"]),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const res = adoptRecommendations(root, a.picks, { version: a.version ?? null, actor: autopilotActor(ex) });
+          let runRes = null;
+          if (a.run === true && a.version && a.version !== "standalone") {
+            runRes = autopilotStart(root, a.version, undefined, autopilotActor(ex));
+          }
+          return { ok: true, ...res, run: runRes };
+        },
+      },
+      run: {
+        name: "autopilot_run_lane",
+        description: "[autopilot] 自动驾驶一条版本泳道：逐目标 收集→执行→评审→交付，完成一个接一个；reviewMode=human 时停在 review 等人。再次触发用 autopilot_stop_lane。",
+        parameters: params({
+          version: { type: "string", description: "版本名，如 V0.1" },
+          review_mode: { type: "string", enum: ["auto", "human"], description: "缺省读全局状态（默认 auto）" },
+          workspace: { type: "string" },
+        }, ["version"]),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          return { ok: true, ...autopilotStart(root, a.version, a.review_mode, autopilotActor(ex)) };
+        },
+      },
+      stop: {
+        name: "autopilot_stop_lane",
+        description: "[autopilot] 中断当前泳道的自动驾驶（当前 attempt 收到 abort，队列清空，已完成的保持交付）。",
+        parameters: params({ workspace: { type: "string" } }, []),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          return autopilotStop(root, autopilotActor(ex));
+        },
+      },
+      status: {
+        name: "autopilot_status",
+        description: "[autopilot] 查看自动驾驶状态：全局提示词/全局目标/开关、执行中泳道进度、推荐清单、归档清单。",
+        parameters: params({ workspace: { type: "string" } }, []),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const r = autopilotRunners.get(root) ?? null;
+          return {
+            ok: true,
+            state: readAutopilotState(root),
+            runner: r ? { version: r.version, reviewMode: r.reviewMode, done: r.done, failed: r.failed, current: r.current?.goalId ?? null, pending: [r.current?.goalId, ...r.queue].filter(Boolean), paused: r.paused } : null,
+            recommendations: readRecommendations(root).length,
+            archived: listArchived(root).length,
+          };
+        },
+      },
+      setGlobalPrompt: {
+        name: "autopilot_set_global_prompt",
+        description: "[autopilot] 设置全局提示词：设置后所有子 AI（执行/推荐/检查）都必须遵循；可随时追加或覆盖（传空串清除）。立即对后续派发生效。",
+        parameters: params({ text: { type: "string", description: "全局提示词全文；空串=清除" }, workspace: { type: "string" } }, ["text"]),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const text = String(a.text ?? "").trim();
+          const state = writeAutopilotState(root, { globalPrompt: text || null }, { actor: autopilotActor(ex) });
+          return { ok: true, globalPrompt: state.globalPrompt, note: "已生效于后续所有 autopilot 派发与推荐" };
+        },
+      },
+      setGlobalGoal: {
+        name: "autopilot_set_global_goal",
+        description: "[autopilot] 设置全局目标：推荐与持续检查以此为锚（autopilot_scan_recommend 会围绕它拆解任务并对齐打分）。",
+        parameters: params({ text: { type: "string", description: "全局目标全文；空串=清除" }, workspace: { type: "string" } }, ["text"]),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const text = String(a.text ?? "").trim();
+          const state = writeAutopilotState(root, { globalGoal: text ? { text, updatedAt: new Date().toISOString() } : null }, { actor: autopilotActor(ex) });
+          return { ok: true, globalGoal: state.globalGoal };
+        },
+      },
+    };
+    for (const t of Object.values(autopilotToolCommon)) {
+      try { ctx.tools.register(t); } catch (e) { console.error(`[dsh-graph-autopilot] 工具注册失败 ${t?.name}:`, e?.message ?? e); }
+    }
+
+    // —— HTTP 路由（看板 UI 用） ——
+    const autopilotHttpRoutes = () => [
+      {
+        path: "/api/dsh-graph-autopilot/state",
+        handler: async (req, res) => {
+          try {
+            const body = req.method === "POST" ? await readBody(req) : {};
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const r = autopilotRunners.get(root) ?? null;
+            json(res, 200, {
+              ok: true,
+              state: readAutopilotState(root),
+              runner: r ? { version: r.version, reviewMode: r.reviewMode, done: r.done, failed: r.failed, current: r.current?.goalId ?? null, pending: [r.current?.goalId, ...r.queue].filter(Boolean), paused: r.paused } : null,
+              recommendations: readRecommendations(root),
+              archived: listArchived(root),
+              delivered: listDelivered(root),
+            });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/scan",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const st = readAutopilotState(root);
+            const recs = scanRecommendations(root, { globalGoalText: st.globalGoal?.text ?? null });
+            saveRecommendations(root, recs, { actor: "human:gui" });
+            json(res, 200, { ok: true, count: recs.length, recommendations: recs });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/adopt",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            if (!Array.isArray(body.picks) || body.picks.length === 0) return json(res, 400, { error: "missing picks" });
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const out = adoptRecommendations(root, body.picks, { version: body.version ?? null, actor: "human:gui" });
+            let runRes = null;
+            if (body.run === true && body.version && body.version !== "standalone") runRes = autopilotStart(root, body.version, body.review_mode, "human:gui");
+            json(res, 200, { ok: true, ...out, run: runRes });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/run",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            if (!body.version) return json(res, 400, { error: "missing version" });
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            json(res, 200, { ok: true, ...autopilotStart(root, body.version, body.review_mode, "human:gui") });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/stop",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            json(res, 200, { ok: true, result: autopilotStop(root, "human:gui") });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/archive",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            if (!body.goal) return json(res, 400, { error: "missing goal" });
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            archiveGoal(root, body.goal, { actor: "human:gui" });
+            json(res, 200, { ok: true, archived: listArchived(root) });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/global-prompt",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const text = String(body.text ?? "").trim();
+            const state = writeAutopilotState(root, { globalPrompt: text || null }, { actor: "human:gui" });
+            json(res, 200, { ok: true, globalPrompt: state.globalPrompt });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/global-goal",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const text = String(body.text ?? "").trim();
+            const state = writeAutopilotState(root, { globalGoal: text ? { text, updatedAt: new Date().toISOString() } : null }, { actor: "human:gui" });
+            json(res, 200, { ok: true, globalGoal: state.globalGoal });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+    ];
+
     // webServer 由 web-app 行提供，可能在 apply 之后才激活：轮询注册（同参考实现）。
     const routeState = { registered: false, timer: null };
     const registerHttpRoutes = () => {
@@ -4324,9 +4726,9 @@ export function apply(ctx, config) {
       const webServer = ctx.get?.("webServer");
       if (!webServer) return;
       try {
-        for (const r of httpRoutes()) disposers.push(webServer.register(r));
+        for (const r of [...httpRoutes(), ...autopilotHttpRoutes()]) disposers.push(webServer.register(r));
         routeState.registered = true;
-        process.stderr.write(`[dsh-graph-host] apply: tools + /api/dsh-graph(+goal+write) registered (root=${root})\n`);
+        process.stderr.write(`[dsh-graph-host] apply: tools + /api/dsh-graph(+goal+write+autopilot) registered (root=${root})\n`);
       } catch (e) {
         console.error("[dsh-graph-host] webServer 路由注册失败:", e?.message ?? e);
       }
