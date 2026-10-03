@@ -2870,6 +2870,9 @@
           // g-352 att-003 第 3 项：窄档（<480px，仅右侧栏实例）主管区重排为单行 + 图标按钮 + 隐藏模型 id
           ? h(SupervisorBar, { id: b.supervisorSession, statusLine: b.supervisorStatus ?? null, statusAt: b.supervisorStatusAt ?? null, narrow: narrowActive })
           : null,
+        // [v0.28] 问题 19：任务执行板 —— .dg-head 工具行下方、泳道区上方的可折叠子代理看板
+        //（默认收起；展开后 10 秒轮询 /api/dsh-graph/agents；只读展示 + 批量发消息，不侵入看板数据流）
+        h(AgentsBoard, { workspace: activeWs }),
         // g-127/g-156/g-164：折叠时对应列窄化为 36px（blocked 和 deliver 独立折叠），
         // 列模板统一由 gridCols 按当前折叠状态动态计算，与 released 泳道网格保持一致
         h("div", { style: { ...S.grid, gridTemplateColumns: gridCols } },
@@ -3651,6 +3654,222 @@
         // [v0.22] 任务连线画布（fixed 覆盖层：连线/橡皮擦 + 三种连接类型）
         h(LinksLayer, { key: "links-layer", workspace: activeWs }),
       );
+    }
+
+    // [v0.28] 问题 19：任务执行板（🛰）—— 看板头部下方的可折叠子代理看板（工厂作用域组件，
+    // 声明在 KanbanView 之外：与 VersionDrawer/g-243 同理，避免每次渲染产生新组件身份）。
+    // 数据：GET /api/dsh-graph/agents → {ok, agents:[{goal, attempt, child_id, parent_session_id,
+    //   live:"running|idle|gone|unknown", provider, model, session_id, tokens?, ctx_pct?}]}
+    //   （graphUrl 统一追加 ?workspace=；tokens/ctx 可能为 null → 显示「—」）。
+    // 交互：① 每卡「↗ 转到对话」**复用**工厂作用域 sessionLinkBtn（与卡片/实时面板同一跳转实现，
+    //         缺 parent/child id 时它返回 null，本处以禁用按钮 + title 说明兜底）；
+    //       ② 每卡 checkbox 多选：选中 ≥1 出现输入框 + 「发送到所选会话」——经 AgentSender 逐个走
+    //         useBoundSession(parent_session_id, child_id) → session.prompt([...], "queue")
+    //         （与 goal-actions.js 判据反馈同一通路），并就地显示每条的排队回执；
+    //       ③ 每卡「输出」展开 LiveStrip（既有实时流组件，全局「实时代理输出」开关在其内部生效；
+    //         不新建流管道）。
+    // 轮询：展开时 10s；收起时不轮询（仅挂载/工作区变化时拉一次，供收起行的「在线数」）。
+    // [v0.28] i18n-keep(category-a)：本组件新增的用户可见文案按要求直接使用中文（不新增 i18n 词条）。
+    // 控件显式配色（不使用 var(--dsw-alias-*)：本机主题下别名会解析成白色 ⇒ 白底白字）。
+    function AgentsBoard(props) {
+      const workspace = props.workspace;
+      const [open, setOpen] = React.useState(false); // 默认收起
+      const [agents, setAgents] = React.useState(null); // null = 尚未加载
+      const [err, setErr] = React.useState(null);
+      const [selected, setSelected] = React.useState(() => new Set()); // child_id 集合
+      const [sendText, setSendText] = React.useState("");
+      const [pendingSends, setPendingSends] = React.useState([]); // [{childId, parentId, goal, text}]
+      const [receipts, setReceipts] = React.useState([]); // [{childId, ok, text}]
+      const [outputOpen, setOutputOpen] = React.useState(() => new Set()); // 「输出」展开的卡
+      const aliveRef = React.useRef(true);
+      const load = React.useCallback(() => {
+        const u = workspace ? graphUrl("/api/dsh-graph/agents", {}, workspace) : null;
+        if (!u) return;
+        fetch(u)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            if (!aliveRef.current) return;
+            if (d?.ok) { setAgents(Array.isArray(d.agents) ? d.agents : []); setErr(null); }
+            else setErr(d?.error ?? "接口返回异常");
+          })
+          .catch((e) => { if (aliveRef.current) setErr(String(e?.message ?? e)); });
+      }, [workspace]);
+      React.useEffect(() => {
+        aliveRef.current = true;
+        load(); // 收起时也拉一次：给收起行的「在线数」
+        if (!open) return () => { aliveRef.current = false; };
+        const t = setInterval(load, 10000); // 展开态 10s 轮询
+        return () => { aliveRef.current = false; clearInterval(t); };
+      }, [open, load]);
+      const toggleIn = (setter) => (id) => {
+        setter((prev) => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id); else next.add(id);
+          return next;
+        });
+      };
+      const toggleSel = toggleIn(setSelected);
+      const toggleOutput = toggleIn(setOutputOpen);
+      const sendToSelected = () => {
+        const text = sendText.trim();
+        if (!text || !Array.isArray(agents) || !selected.size) return;
+        const picks = agents
+          .filter((a) => a?.child_id && selected.has(a.child_id))
+          .map((a) => ({ childId: a.child_id, parentId: a.parent_session_id ?? null, goal: a.goal ?? "", text }));
+        if (!picks.length) return;
+        setReceipts([]);
+        setPendingSends(picks);
+      };
+      const onReceipt = (childId, ok, text) => {
+        setReceipts((prev) => [...prev, { childId, ok, text }]);
+      };
+      const onSendDone = (childId) => {
+        setPendingSends((prev) => prev.filter((p) => p.childId !== childId));
+      };
+      const runningCount = (agents ?? []).filter((a) => a?.live === "running").length;
+      const dotColor = (live) => (live === "running" ? "#3aa675" : live === "idle" ? "#e0a53a" : "#8a8a8a");
+      const liveLabel = { running: "运行中", idle: "空闲", gone: "已结束", unknown: "未知" };
+      const AB_BTN = { fontSize: 11, padding: "1px 6px", cursor: "pointer", background: "#2b2f3a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, flexShrink: 0, whiteSpace: "nowrap" };
+      const AB_INPUT = { background: "#20222a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, padding: "3px 6px", fontSize: 12, flex: 1, minWidth: 0, boxSizing: "border-box" };
+      const card = (a) => {
+        const childId = a?.child_id ?? "";
+        const key = childId || (String(a?.goal ?? "?") + "#" + String(a?.attempt ?? "?"));
+        const sel = childId ? selected.has(childId) : false;
+        const live = a?.live ?? "unknown";
+        return h("div", {
+          key,
+          className: "dg-agents-card",
+          "data-agents-child-id": childId || undefined,
+          style: { minWidth: 0, flex: "0 1 320px", border: "1px solid rgba(140,145,155,.35)", borderRadius: 6, padding: "6px 8px", background: "rgba(128,128,128,.07)", display: "flex", flexDirection: "column", gap: 3 },
+        },
+          h("div", { style: { display: "flex", alignItems: "center", gap: 6, minWidth: 0 } },
+            h("input", {
+              type: "checkbox", checked: sel, disabled: !childId,
+              onChange: () => toggleSel(childId),
+              title: "勾选后可批量发送消息到所选会话",
+              style: { flexShrink: 0, cursor: childId ? "pointer" : "default" },
+            }),
+            h("span", { title: liveLabel[live] ?? String(live), style: { flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: dotColor(live), display: "inline-block" } }),
+            h("span", { style: { fontSize: 12, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, String(a?.goal ?? "(未知目标)")),
+            a?.attempt != null ? h("span", { style: { fontSize: 10, opacity: 0.7, flexShrink: 0 } }, "att " + String(a.attempt)) : null,
+            h("span", { style: { flex: 1 } }),
+            h("button", {
+              className: "dg-btn", style: AB_BTN,
+              title: "展开/收起该会话最近输出（实时流，受设置里「实时代理输出」开关控制）",
+              onClick: () => toggleOutput(childId),
+            }, (outputOpen.has(childId) ? "▾ 输出" : "▸ 输出")),
+            childId
+              ? sessionLinkBtn(a.parent_session_id, childId, "↗ 转到对话")
+              : h("button", { className: "dg-btn", style: { ...AB_BTN, opacity: 0.45, cursor: "default" }, disabled: true, title: "缺少子会话 id，无法跳转" }, "↗ 转到对话")),
+          h("div", { style: { fontSize: 11, opacity: 0.85, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
+            h("span", null, "模型：" + (a?.provider ?? "—") + "/" + (a?.model ?? "—")),
+            h("span", null, "tokens：" + (a?.tokens != null ? String(a.tokens) : "—")),
+            h("span", null, "ctx：" + (a?.ctx_pct != null ? String(a.ctx_pct) + "%" : "—")),
+            a?.session_id ? h("span", { style: { opacity: 0.6, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "sid " + String(a.session_id).slice(0, 10) + "…") : null),
+          outputOpen.has(childId) && childId
+            ? h(LiveStrip, { parentId: a.parent_session_id ?? null, childId })
+            : null);
+      };
+      return h("div", {
+        className: "dg-agents-board",
+        "data-dsh-agents-board": "",
+        style: { marginBottom: 8, border: "1px solid rgba(140,145,155,.35)", borderRadius: 6, background: "rgba(128,128,128,.05)", padding: "4px 10px 6px" },
+      },
+        h("div", {
+          style: { display: "flex", alignItems: "center", gap: 8, minHeight: 24, cursor: "pointer", userSelect: "none", flexWrap: "wrap" },
+          onClick: () => setOpen((v) => !v),
+        },
+          h("strong", { style: { fontSize: 12, whiteSpace: "nowrap" } }, (open ? "▾" : "▸") + " 🛰 任务执行板"),
+          h("span", { style: { fontSize: 11, opacity: 0.9, whiteSpace: "nowrap" } },
+            !workspace ? "（工作区未确定）" : agents == null ? "（读取中…）" : ("运行中 " + runningCount + " / 共 " + agents.length)),
+          h("span", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+            "当前工作区子代理会话一览；展开后 10 秒自动刷新，可勾选多张卡批量发送消息"),
+          h("button", {
+            className: "dg-btn", style: { ...AB_BTN, marginLeft: 4 },
+            title: open ? "收起任务执行板" : "展开任务执行板",
+            onClick: (e) => { e.stopPropagation(); setOpen((v) => !v); },
+          }, open ? "收起" : "展开")),
+        err ? h("div", { style: { fontSize: 11, color: "#f08080", marginTop: 2 } }, "读取失败：" + err) : null,
+        open && Array.isArray(agents)
+          ? (agents.length
+              ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6, minWidth: 0 } }, ...agents.map(card))
+              : h("div", { style: { fontSize: 11, opacity: 0.7, marginTop: 4 } }, "暂无子代理会话（执行中的目标派发子代理后会出现在这里）"))
+          : null,
+        open && selected.size > 0
+          ? h("div", { style: { marginTop: 6, padding: "6px 8px", border: "1px solid rgba(76,141,255,.4)", borderRadius: 6, background: "rgba(76,141,255,.07)", display: "flex", flexDirection: "column", gap: 4 } },
+              h("div", { style: { display: "flex", gap: 6, alignItems: "center", minWidth: 0 } },
+                h("span", { style: { fontSize: 11, flexShrink: 0, whiteSpace: "nowrap" } }, "已选 " + selected.size + " 个会话："),
+                h("input", {
+                  style: AB_INPUT, value: sendText,
+                  placeholder: "输入要排队发送给所选会话的消息…",
+                  onChange: (e) => setSendText(e.target.value),
+                  onKeyDown: (e) => { if (e.key === "Enter") sendToSelected(); },
+                }),
+                h("button", {
+                  className: "dg-btn", style: AB_BTN,
+                  disabled: pendingSends.length > 0 || !sendText.trim(),
+                  onClick: sendToSelected,
+                }, pendingSends.length > 0 ? "发送中…" : "发送到所选会话")),
+              receipts.length
+                ? h("div", { style: { display: "flex", flexDirection: "column", gap: 1 } },
+                    ...receipts.map((rc, i) => h("div", { key: i, style: { fontSize: 11, color: rc.ok ? "#6ee7a0" : "#f08080" } },
+                      (rc.ok ? "✅ " : "❌ ") + String(rc.childId ?? "").slice(0, 8) + "…：" + rc.text)))
+                : null,
+              h("span", { className: "dg-hint", style: { fontSize: 10, opacity: 0.65 } },
+                "消息经子代理会话排队（queue）投递，子代理空闲时取队列执行。"))
+          : null,
+        // 多选发送执行器：pendingSends 里每个 childId 一个隐藏 sender（逐个排队，就地回执）
+        pendingSends.map((p) => h(AgentSender, {
+          key: "send-" + p.childId,
+          parentId: p.parentId, childId: p.childId, goal: p.goal, text: p.text,
+          onReceipt, onDone: onSendDone,
+        })));
+    }
+
+    // [v0.28] 任务执行板「发送到所选会话」的逐卡执行器：挂载即绑定该子代理会话
+    //（useBoundSession，与 goal-actions.js 判据反馈同一通路），排队成功后经 onReceipt 回执、
+    // onDone 请求移除自身；渲染 null（无 UI）。5s 内绑不出会话按失败回执兜底，避免选中卡永久挂起。
+    // 注意：effect 依赖刻意只含 [session, childId]（onReceipt/onDone 每次渲染都是新引用，不能进依赖），
+    // sentRef 防重复发送。
+    function AgentSender(props) {
+      const { session } = useBoundSession(props.parentId ?? null, props.childId ?? null);
+      const sentRef = React.useRef(false);
+      React.useEffect(() => {
+        if (sentRef.current) return undefined;
+        const fail = (text) => {
+          sentRef.current = true;
+          props.onReceipt?.(props.childId, false, text);
+          props.onDone?.(props.childId);
+        };
+        if (!session?.prompt) {
+          const t = setTimeout(() => { if (!sentRef.current) fail("会话未连接（绑定不可用）"); }, 5000);
+          return () => clearTimeout(t);
+        }
+        let alive = true;
+        (async () => {
+          sentRef.current = true;
+          try {
+            // i18n-keep(category-b)：发往子代理会话的提示词模板（session.prompt 载荷），非 UI 文案。
+            const res = await session.prompt(
+              [{ type: "text", text: "【" + (props.goal || "执行板") + " 消息】\n" + props.text }], "queue");
+            if (!alive) return;
+            if (res?.ok) {
+              // 与判据反馈一致：排队回执读真实排队状态（0.1.6 inbox 投影 / 0.1.5 快照 queue 回退）
+              const depth = sessionQueueState(session).pendingCount;
+              props.onReceipt?.(props.childId, true, depth > 0 ? "已排队（当前队列深度 " + depth + "）" : "已排队");
+            } else {
+              // g-321 同款：0.1.6 的 subagent/delivery-unavailable 与 ACTIVATION_LIMIT_REACHED 给出可操作提示
+              const friendly = subagentDispatchErrorText(res?.error);
+              props.onReceipt?.(props.childId, false, friendly ?? ("发送失败：" + (res?.error?.message ?? "未知错误")));
+            }
+          } catch (e) {
+            if (alive) props.onReceipt?.(props.childId, false, "发送失败：" + String(e?.message ?? e));
+          }
+          if (alive) props.onDone?.(props.childId);
+        })();
+        return () => { alive = false; };
+      }, [session, props.childId]);
+      return null;
     }
 
     let appCtx = null;

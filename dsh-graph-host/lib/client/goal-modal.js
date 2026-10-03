@@ -736,10 +736,151 @@
         h("div", { style: { ...S.meta, fontSize: 11, marginTop: 6, opacity: 0.75 } }, dgT("results.writeNote")));
     }
 
+    // [v0.28] 问题 18：「⚙ 执行设置」分区 —— 目标级执行设置（Agent 预设 / 技能 / 模型 / 上下文长度 / 预设提示词）。
+    // 数据契约（后端由另一代理实现）：POST /api/dsh-graph/goal-extras
+    //   body {goal, skill_refs?, preset?, provider?, model?, context_len?, extra_prompt?} —— 全部可选；
+    //   前端对六个字段**显式发送**：空串/null = 清除该项（契约口径「空=清除」）。
+    // 预填：① 详情数据若已带执行设置（goal_extras / meta.goal_extras）直接回填；
+    //       ② 否则打开分区时单独 GET /api/dsh-graph/goal-extras?goal=… 回读（graphUrl 自动带 workspace）；
+    //       ③ GET 端点缺失/失败 → 留空由用户填写，并就地 dg-hint 注明（不粉饰、不报错刷屏）。
+    // 预设目录：POST /api/dsh-graph-autopilot/catalog（与新建目标弹窗 [v0.18] 同一端点、同一静默降级为空列表）。
+    // [v0.28] i18n-keep(category-a)：本组件新增的用户可见文案按要求直接使用中文（不新增 i18n 词条）。
+    // 控件显式配色（不使用 var(--dsw-alias-*)：本机主题下别名会解析成白色 ⇒ 白底白字）；
+    // 深色值沿用 [v0.27] settings-modal 的 #20222a，避开 g-176 契约禁止的 #2a2b31 字面量。
+    function GoalExecSettings(props) {
+      const { goalId, goalData } = props;
+      const ES_INPUT = { background: "#20222a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, padding: "4px 6px", fontSize: 12, boxSizing: "border-box", width: "100%" };
+      const ES_OPTION = { background: "#20222a", color: "#e6e6e6" };
+      const ES_BTN = { fontSize: 12, padding: "3px 12px", cursor: "pointer", background: "rgba(76,141,255,.22)", color: "#e6e6e6", border: "1px solid rgba(76,141,255,.55)", borderRadius: 4 };
+      const [presets, setPresets] = React.useState([]);
+      const [preset, setPreset] = React.useState("");
+      const [skillRefs, setSkillRefs] = React.useState("");
+      const [provider, setProvider] = React.useState("");
+      const [model, setModel] = React.useState("");
+      const [contextLen, setContextLen] = React.useState("");
+      const [extraPrompt, setExtraPrompt] = React.useState("");
+      const [saving, setSaving] = React.useState(false);
+      const [note, setNote] = React.useState(null); // {kind:"ok"|"err"|"info", text}
+      // 已知执行设置对象 → 表单回填（仅回填存在的字段；返回是否命中任一字段）
+      const applyExtras = (ex) => {
+        if (!ex || typeof ex !== "object") return false;
+        let hit = false;
+        if (ex.preset != null && ex.preset !== "") { setPreset(String(ex.preset)); hit = true; }
+        if (ex.skill_refs != null && ex.skill_refs !== "") {
+          setSkillRefs(Array.isArray(ex.skill_refs) ? ex.skill_refs.join(", ") : String(ex.skill_refs)); hit = true;
+        }
+        if (ex.provider != null && ex.provider !== "") { setProvider(String(ex.provider)); hit = true; }
+        if (ex.model != null && ex.model !== "") { setModel(String(ex.model)); hit = true; }
+        if (ex.context_len != null && ex.context_len !== "") { setContextLen(String(ex.context_len)); hit = true; }
+        if (ex.extra_prompt != null && ex.extra_prompt !== "") { setExtraPrompt(String(ex.extra_prompt)); hit = true; }
+        return hit;
+      };
+      React.useEffect(() => {
+        let alive = true;
+        // 预设目录（失败静默 → 空列表，select 仍可用）
+        fetch("/api/dsh-graph-autopilot/catalog", {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspace: currentWorkspace() }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => { if (alive && d?.ok) setPresets(Array.isArray(d.presets) ? d.presets : []); })
+          .catch(() => {});
+        // 预填①：详情数据已知值优先（goal_extras 直接给 / 或挂在 meta 下）
+        const known = goalData?.goal_extras ?? goalData?.meta?.goal_extras ?? null;
+        if (applyExtras(known)) return () => { alive = false; };
+        // 预填②：详情不含 → 尝试单独 GET 回读；端点缺失/失败 → 留空并就地注明（预填③的「注明」）
+        const u = graphUrl("/api/dsh-graph/goal-extras", { goal: goalId });
+        if (!u) {
+          if (alive) setNote({ kind: "info", text: "未确定工作区：无法回读已存执行设置。留空 = 不覆盖，直接填写后保存即可。" });
+          return () => { alive = false; };
+        }
+        fetch(u)
+          .then((r) => (r.ok ? r.json().catch(() => null) : null))
+          .then((d) => {
+            if (!alive) return;
+            const ex = d?.extras ?? d?.goal_extras ?? (d && d.goal ? d : null);
+            if (applyExtras(ex)) return;
+            setNote({ kind: "info", text: "未读到已保存的执行设置（详情数据不带这些字段，回读端点缺失或未返回）—— 留空 = 不覆盖；直接填写后「保存执行设置」。" });
+          })
+          .catch(() => { if (alive) setNote({ kind: "info", text: "未读到已保存的执行设置（回读请求失败）—— 留空 = 不覆盖；直接填写后「保存执行设置」。" }); });
+        return () => { alive = false; };
+      }, [goalId]);
+      const doSave = async () => {
+        const u = graphUrl("/api/dsh-graph/goal-extras");
+        if (!u) { setNote({ kind: "err", text: "未确定工作区，无法保存执行设置。" }); return; }
+        const lenRaw = contextLen.trim();
+        if (lenRaw !== "" && (!Number.isFinite(Number(lenRaw)) || Number(lenRaw) <= 0)) {
+          setNote({ kind: "err", text: "上下文长度需为正整数（token 预算），或留空清除。" });
+          return;
+        }
+        setSaving(true); setNote(null);
+        try {
+          const r = await fetch(u, {
+            method: "POST", credentials: "same-origin",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              goal: goalId,
+              preset: preset.trim(),            // 空 = 清除
+              skill_refs: skillRefs.trim(),     // 空 = 清除
+              provider: provider.trim(),        // 空 = 清除
+              model: model.trim(),              // 空 = 清除
+              context_len: lenRaw === "" ? null : Number(lenRaw),
+              extra_prompt: extraPrompt.trim(), // 空 = 清除
+            }),
+          });
+          const data = await r.json().catch(() => ({}));
+          if (r.ok && data?.ok) {
+            setNote({ kind: "ok", text: "✅ 执行设置已保存（空项 = 清除；对该目标之后的执行派发生效）" });
+            props.onSaved?.(); // [v0.28] 与其它分区一致：保存成功后重载详情（详情将来回读执行设置时即可见）
+          }
+          else setNote({ kind: "err", text: "保存失败：" + (data?.error ?? ("HTTP " + r.status)) });
+        } catch (e) {
+          setNote({ kind: "err", text: "保存失败：" + String(e?.message ?? e) });
+        }
+        setSaving(false);
+      };
+      const rowStyle = { display: "flex", flexDirection: "column", gap: 2, marginTop: 6 };
+      const labelStyle = { fontSize: 11, opacity: 0.8 };
+      const noteColor = note?.kind === "err" ? "#f08080" : note?.kind === "ok" ? "#6ee7a0" : "inherit";
+      return h("div", { style: S.modalSection },
+        h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+          h("div", { style: S.modalH }, "⚙ 执行设置"),
+          h("span", { style: { ...S.meta, fontSize: 11, fontWeight: 400 } }, "仅作用于本目标的执行派发；空 = 不指定/清除")),
+        h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, marginTop: 2 } },
+          "这里保存目标级执行设置（Agent 预设 / 技能 / 模型 / 上下文长度 / 追加提示词），在该目标下一次派发执行子代理时生效；全局与按泳道的设置请看看板右上角「⚙ 看板设置」。"),
+        h("div", { style: rowStyle },
+          h("label", { style: labelStyle }, "Agent 预设"),
+          h("select", { value: preset, onChange: (e) => setPreset(e.target.value), style: { ...ES_INPUT, cursor: "pointer" } },
+            h("option", { value: "", style: ES_OPTION }, "（不指定 · AI 自选）"),
+            ...presets.map((p) => h("option", { key: p?.name ?? String(p), value: String(p?.name ?? p), style: ES_OPTION },
+              String(p?.name ?? p) + (p?.description ? " — " + String(p.description).slice(0, 40) : ""))))),
+        h("div", { style: rowStyle },
+          h("label", { style: labelStyle }, "技能"),
+          h("input", { style: ES_INPUT, value: skillRefs, placeholder: "/skill 或逗号分隔，如 anysearch, ai-config", onChange: (e) => setSkillRefs(e.target.value) })),
+        h("div", { style: { display: "flex", gap: 6, marginTop: 6 } },
+          h("div", { style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 } },
+            h("label", { style: labelStyle }, "模型 provider"),
+            h("input", { style: ES_INPUT, value: provider, placeholder: "留空 = 继承", onChange: (e) => setProvider(e.target.value) })),
+          h("div", { style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 } },
+            h("label", { style: labelStyle }, "模型 model"),
+            h("input", { style: ES_INPUT, value: model, placeholder: "留空 = 继承", onChange: (e) => setModel(e.target.value) }))),
+        h("div", { style: rowStyle },
+          h("label", { style: labelStyle }, "上下文长度（token 预算）"),
+          h("input", { style: ES_INPUT, type: "number", min: 0, value: contextLen, placeholder: "留空 = 不指定", onChange: (e) => setContextLen(e.target.value) })),
+        h("div", { style: rowStyle },
+          h("label", { style: labelStyle }, "预设提示词（extra_prompt）"),
+          h("textarea", { style: { ...ES_INPUT, minHeight: 56, resize: "vertical", fontFamily: "inherit" }, value: extraPrompt, placeholder: "追加给执行子 AI 的本目标专属要求", onChange: (e) => setExtraPrompt(e.target.value) })),
+        h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 8 } },
+          h("button", { style: ES_BTN, className: "dg-btn", disabled: saving, onClick: doSave },
+            saving ? "保存中…" : "保存执行设置")),
+        note ? h("div", { style: { ...S.meta, marginTop: 4, fontSize: 11, color: noteColor } }, note.text) : null);
+    }
+
     function GoalModal(props) {
       useLocaleRevision();
       const [state, setState] = React.useState({ loading: true });
-      const [tab, setTab] = React.useState("detail"); // "detail" | "worktree" | "results" | "context" | "activity"
+      const [tab, setTab] = React.useState("detail"); // "detail" | "worktree" | "results" | "context" | "exec" | "activity"
       const [logSort, setLogSort] = React.useState("desc"); // "desc" | "asc"
       const [logFilter, setLogFilter] = React.useState(""); // "" 全部 / 事件名
       const [relaunchRoute, setRelaunchRoute] = React.useState(null); // g-109：最近一次重新执行的模型路由（显示兜底）
@@ -1051,6 +1192,11 @@
         const resultsTab = [
           h(AttemptResults, { key: "results", results: d.results, goalId: props.id, onRefreshed: load }),
         ];
+        // [v0.28] 问题 18：「⚙ 执行设置」tab —— 目标级执行设置（Agent 预设/技能/模型/上下文长度/预设提示词）；
+        // goalData 供预填（详情已知值），onSaved 保存成功后重载详情。
+        const execTab = [
+          h(GoalExecSettings, { key: "exec", goalId: props.id, goalData: d, onSaved: load }),
+        ];
         const activityTab = (() => {
           const meaningful = (d.events ?? []).filter((e) => MEANINGFUL.has(e.event));
           if (!meaningful.length) {
@@ -1173,6 +1319,20 @@
               },
               onClick: () => setTab("context"),
             }, dgT("tab.context")),
+            // [v0.28] 问题 18：「⚙ 执行设置」tab（与「📌 执行上下文」同样式的页签，紧邻其右）
+            h("button", {
+              style: {
+                fontSize: 12, padding: "5px 14px", cursor: "pointer",
+                marginBottom: -1, borderRadius: "6px 6px 0 0",
+                border: "1px solid " + (tab === "exec" ? "rgba(128,128,128,.35)" : "transparent"),
+                borderBottom: "none",
+                background: tab === "exec" ? "rgba(128,128,128,.10)" : "transparent",
+                fontWeight: tab === "exec" ? 700 : 400,
+                color: tab === "exec" ? "var(--dsw-alias-label-primary, #8ab4ff)" : "inherit",
+                opacity: tab === "exec" ? 1 : 0.7,
+              },
+              onClick: () => setTab("exec"),
+            }, "⚙ 执行设置"),
             // g-129: goal.md 链接放在 tab 行右侧
             d.goalFile
               ? h("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 4, marginBottom: 1 } },
@@ -1205,7 +1365,7 @@
             style: { border: "1px solid rgba(128,128,128,.35)", borderTop: "none",
                      borderRadius: "0 6px 6px 6px", padding: "10px 12px",
                      background: "rgba(128,128,128,.06)" },
-          }, tab === "detail" ? detailTab : tab === "worktree" ? worktreeTab : tab === "results" ? resultsTab : tab === "context" ? contextTab : activityTab),
+          }, tab === "detail" ? detailTab : tab === "worktree" ? worktreeTab : tab === "results" ? resultsTab : tab === "context" ? contextTab : tab === "exec" ? execTab : activityTab),
         ];
       }
 

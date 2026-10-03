@@ -50,6 +50,12 @@ export interface AutopilotState {
   laneModels?: Record<string, { provider?: string | null; model?: string | null; reasoning_effort?: string | null }>;
   /** [v0.19] 泳道职责提示词：key = 泳道键（版本 slug / standalone / backlog），值 = 该泳道是干什么的（派发时注入执行子代理）。 */
   lanePrompts: Record<string, string>;
+  /** [v0.28] 目标推进模式：管理员定时器每轮检查「有未完结目标」的泳道并自动起跑 runner（绝不采纳新推荐）。 */
+  advanceMode?: boolean;
+  /** [v0.28] 全局托管模式：包含目标推进的全部行为，另含推荐自动扫描（空清单 15 分钟一扫）与
+   *  自动采纳（推荐非空且无 runner 在跑时采纳第 1 条到「建议泳道」，10 分钟冷却）。
+   *  两个模式都**永不自动停止**：只有开关被关掉才不再推进/不再采纳（不杀在跑的 runner）。 */
+  steward?: { enabled: boolean; lastScanAt?: string | null; lastAdoptAt?: string | null };
 }
 
 const DEFAULT_STATE: AutopilotState = {
@@ -63,6 +69,8 @@ const DEFAULT_STATE: AutopilotState = {
   managerLastRun: null,
   managerUpdateGlobals: true,
   lanePrompts: {},
+  advanceMode: false,
+  steward: { enabled: false, lastScanAt: null, lastAdoptAt: null },
 };
 
 export function readAutopilotState(root: string): AutopilotState {
@@ -744,23 +752,69 @@ export function listTrash(root: string): { goals: { id: string; title: string; f
 export function setGoalExtras(
   root: string,
   id: string,
-  extras: { skill_refs?: string[]; preset?: string | null; actor: string },
-): { ok: true; skill_refs: string[]; preset: string | null } {
+  extras: {
+    skill_refs?: string[];
+    preset?: string | null;
+    actor: string;
+    /** [v0.28] 问题 18：目标级执行设置 —— provider/model 覆盖泳道级与全局路由；
+     *  context_len 为目标上下文预算（tokens，派发时以文字告知执行子代理注意裁剪）；
+     *  extra_prompt 为负责人为本目标追加的执行要求（派发时作为独立段注入 attempt brief）。
+     *  语义：undefined = 保持现状（不改动）；null 或空串 = 清除；非空 = 写入。 */
+    provider?: string | null;
+    model?: string | null;
+    context_len?: number | string | null;
+    extra_prompt?: string | null;
+  },
+): {
+  ok: true;
+  skill_refs: string[];
+  preset: string | null;
+  provider: string | null;
+  model: string | null;
+  context_len: number | null;
+  extra_prompt: string | null;
+} {
   const file = findGoalFile(root, id);
   const doc = loadGoal(file);
   const refs = Array.isArray(extras.skill_refs)
     ? extras.skill_refs.map((s) => String(s).trim()).filter(Boolean).slice(0, 20)
     : Array.isArray(doc.meta.skill_refs) ? doc.meta.skill_refs as string[] : [];
   const preset = extras.preset == null ? null : String(extras.preset).trim() || null;
+  const normStr = (v: unknown): string | null => (v == null ? null : (String(v).trim() || null));
+  const provider = extras.provider === undefined ? ((doc.meta.agent_provider as string | undefined) ?? null) : normStr(extras.provider);
+  const model = extras.model === undefined ? ((doc.meta.agent_model as string | undefined) ?? null) : normStr(extras.model);
+  let contextLen: number | null = null;
+  if (extras.context_len === undefined) {
+    const prev = Number(doc.meta.agent_context_len);
+    contextLen = Number.isFinite(prev) && prev > 0 ? Math.round(prev) : null;
+  } else if (extras.context_len != null && String(extras.context_len).trim() !== "") {
+    const n = Number(extras.context_len);
+    contextLen = Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  }
+  const extraPrompt = extras.extra_prompt === undefined
+    ? ((doc.meta.agent_extra_prompt as string | undefined) ?? null)
+    : normStr(extras.extra_prompt);
   doc.meta.skill_refs = refs;
   doc.meta.agent_preset = preset;
+  doc.meta.agent_provider = provider;
+  doc.meta.agent_model = model;
+  doc.meta.agent_context_len = contextLen;
+  doc.meta.agent_extra_prompt = extraPrompt;
   saveGoal(file, doc);
   appendEvent(root, {
     actor: extras.actor,
     event: "autopilot.goal_extras_set",
-    details: { goal: id, skills: refs, preset },
+    details: {
+      goal: id,
+      skills: refs,
+      preset,
+      provider,
+      model,
+      context_len: contextLen,
+      extra_prompt_len: extraPrompt ? extraPrompt.length : 0,
+    },
   });
-  return { ok: true, skill_refs: refs, preset };
+  return { ok: true, skill_refs: refs, preset, provider, model, context_len: contextLen, extra_prompt: extraPrompt };
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,6 +1342,48 @@ export function listBlockedGoals(root: string): { id: string; title: string; rea
       const f = join(sd, id, "goal.md");
       if (existsSync(f)) push(f, "standalone");
     }
+  }
+  return out;
+}
+
+/**
+ * [v0.28] 列出「有未完结目标」的泳道（versions/* 各泳道 + 独立目标 goals/）。
+ * 未完结 = 存在「非 draft 且未 delivered、未归档」的目标（planning/collecting/ready/
+ * in_progress/review/blocked 都算推进对象）。供目标推进 / 全局托管模式判定该给哪条
+ * 泳道确保 runner 在跑；versions 优先、独立目标（standalone）殿后。
+ */
+export function listLanesWithOpenGoals(root: string): { lane: string; open: number }[] {
+  const out: { lane: string; open: number }[] = [];
+  const isOpenGoal = (file: string): boolean => {
+    try {
+      const doc = loadGoal(file);
+      if (doc.meta.archived) return false;
+      const status = String(doc.meta.status ?? "");
+      return status !== "draft" && status !== "delivered";
+    } catch { /* 半成品跳过 */ return false; }
+  };
+  const versionsDir = join(root, "versions");
+  if (existsSync(versionsDir)) {
+    for (const v of readdirSync(versionsDir).sort()) {
+      const gd = join(versionsDir, v, "goals");
+      if (!existsSync(gd)) continue;
+      let n = 0;
+      for (const id of readdirSync(gd)) {
+        const f = join(gd, id, "goal.md");
+        if (existsSync(f) && isOpenGoal(f)) n++;
+      }
+      if (n > 0) out.push({ lane: v, open: n });
+    }
+  }
+  const sd = join(root, "goals");
+  if (existsSync(sd)) {
+    let n = 0;
+    for (const id of readdirSync(sd)) {
+      if (id === "archived") continue;
+      const f = join(sd, id, "goal.md");
+      if (existsSync(f) && isOpenGoal(f)) n++;
+    }
+    if (n > 0) out.push({ lane: "standalone", open: n });
   }
   return out;
 }

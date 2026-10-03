@@ -212,6 +212,8 @@ import {
   listStacks,
   stackTrashItems,
   unstackTrash,
+  // [v0.28] 目标推进 / 全局托管：列出「有未完结目标」的泳道
+  listLanesWithOpenGoals,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -1056,6 +1058,28 @@ export const discoverAttemptWorktrees = (workspace, goalId, attempts, graphRoot 
   return result;
 };
 
+// [v0.28] 目标推进模式：root -> 上次尝试起跑的时间戳（模块级，跨 apply 重挂载保留；冷却 10 分钟防风暴）
+const advanceStartAttempts = new Map();
+// [v0.28] 全局托管：autoPresetFor 预设 → 建议泳道映射（三个内置分组中挑一个落点）。
+// 映射不到任何预设（autoPresetFor 返回 null 或表里没有）时按 interaction→deploy-test→backend 轮换
+// （模块级计数器，不引入随机数）。
+const STEWARD_PRESET_TO_LANE = {
+  programming: "backend",
+  "plugin-dev": "backend",
+  swarm: "backend",
+  flow: "backend",
+  ppt: "interaction",
+  redteam: "interaction",
+  "expert-mode": "interaction",
+};
+const STEWARD_ROTATION = ["interaction", "deploy-test", "backend"];
+let stewardRotateSeq = 0;
+const stewardLaneFor = (text) => {
+  const preset = autoPresetFor(text);
+  if (preset && STEWARD_PRESET_TO_LANE[preset]) return STEWARD_PRESET_TO_LANE[preset];
+  return STEWARD_ROTATION[stewardRotateSeq++ % STEWARD_ROTATION.length];
+};
+
 export function apply(ctx, config) {
   // g-112：统一 root 解析 = resolve(workspaceRoot, config?.root ?? ".dsh-graph")
   // g-149 修复：apply 级别的 root 仅用于日志和 marker 自测——不调用 init()。
@@ -1425,6 +1449,89 @@ export function apply(ctx, config) {
     } catch {
       return "unknown";
     }
+  };
+
+  // [v0.28] 问题 19：执行板数据 —— 扫描本工作区全部 attempt 绑定记录，投影出插件派生的执行子代理清单。
+  // 数据源：versions/*/goals/*/attempts/* 与 goals/*/attempts/* 的 attempt.md meta
+  // （child_id/parent_session_id/provider/model 在 bindAttemptChild 时写入）。
+  // live 用 childLiveState（live registry 权威）；tokens/上下文大小只在 live Agent 的 session 头
+  // 拿得到时给出，拿不到一律 null（不编造）。在跑的排前（running→idle→unknown→gone）。
+  const AGENTS_LIST_CAP = 500;
+  const AGENTS_LIVE_ORDER = { running: 0, idle: 1, unknown: 2, gone: 3 };
+  const collectAttemptAgents = (root) => {
+    const agentsRegistry = ctx.get?.("agents");
+    const rows = [];
+    const scanGoalDir = (goalDir, goal, lane) => {
+      const adir = join(goalDir, "attempts");
+      if (!existsSync(adir)) return;
+      let entries = [];
+      try { entries = readdirSync(adir).filter((d) => d.startsWith("att-")); } catch { return; }
+      for (const att of entries) {
+        const f = join(adir, att, "attempt.md");
+        if (!existsSync(f)) continue;
+        let meta = null;
+        try { meta = loadGoal(f)?.meta ?? null; } catch { continue; }
+        const childId = meta?.child_id ? String(meta.child_id) : null;
+        if (!childId) continue; // 从未绑定子代理的 attempt 不进执行板
+        let live = "unknown";
+        try { live = childLiveState(childId); } catch { live = "unknown"; }
+        let tokens = null;
+        let contextSize = null;
+        try {
+          const a = agentsRegistry && typeof agentsRegistry.get === "function" ? agentsRegistry.get(childId) : null;
+          const usage = a?.session?.usage ?? a?.usage ?? null;
+          if (usage && typeof usage === "object") {
+            if (Number.isFinite(usage.totalTokens)) tokens = usage.totalTokens;
+            else if (Number.isFinite(usage.total_tokens)) tokens = usage.total_tokens;
+            else if (Number.isFinite(usage.inputTokens) && Number.isFinite(usage.outputTokens)) tokens = usage.inputTokens + usage.outputTokens;
+            else if (Number.isFinite(usage.input_tokens) && Number.isFinite(usage.output_tokens)) tokens = usage.input_tokens + usage.output_tokens;
+          }
+          const cs = a?.session?.contextSize ?? a?.contextSize ?? null;
+          if (Number.isFinite(cs)) contextSize = cs;
+        } catch { /* 拿不到就置 null */ }
+        const parentSessionId = meta?.parent_session_id ? String(meta.parent_session_id) : null;
+        rows.push({
+          goal,
+          lane,
+          attempt: String(meta?.id ?? att),
+          child_id: childId,
+          parent_session_id: parentSessionId,
+          session_id: parentSessionId, // GUI 打开子代理会话用的就是父会话 id（绑定记录里没有独立子会话 id）
+          live,
+          provider: meta?.provider ? String(meta.provider) : null,
+          model: meta?.model ? String(meta.model) : null,
+          detached: meta?.detached === true,
+          started_at: meta?.started_at ? String(meta.started_at) : null,
+          tokens,
+          context_size: contextSize,
+        });
+      }
+    };
+    const versionsDir = join(root, "versions");
+    if (existsSync(versionsDir)) {
+      for (const v of readdirSync(versionsDir)) {
+        const gd = join(versionsDir, v, "goals");
+        if (!existsSync(gd)) continue;
+        for (const id of readdirSync(gd)) {
+          const gdir = join(gd, id);
+          if (existsSync(join(gdir, "goal.md"))) scanGoalDir(gdir, id, v);
+        }
+      }
+    }
+    const standaloneDir = join(root, "goals");
+    if (existsSync(standaloneDir)) {
+      for (const id of readdirSync(standaloneDir)) {
+        if (id === "archived") continue;
+        const gdir = join(standaloneDir, id);
+        if (existsSync(join(gdir, "goal.md"))) scanGoalDir(gdir, id, "standalone");
+      }
+    }
+    rows.sort((a, b) =>
+      ((AGENTS_LIVE_ORDER[a.live] ?? 9) - (AGENTS_LIVE_ORDER[b.live] ?? 9))
+      || String(b.started_at ?? "").localeCompare(String(a.started_at ?? ""))
+      || String(b.attempt).localeCompare(String(a.attempt)));
+    const truncated = rows.length > AGENTS_LIST_CAP;
+    return { agents: truncated ? rows.slice(0, AGENTS_LIST_CAP) : rows, total: rows.length, truncated };
   };
 
   // GUI 派发的子代理需要真实 parent Agent：startContinuable 内部强解引用 parent
@@ -2948,6 +3055,22 @@ export function apply(ctx, config) {
         }
       },
     },
+    // [v0.28] 问题 19：执行板数据 —— 本工作区插件派生的全部执行子代理（attempt 绑定记录扫描）。
+    // GET（query workspace=）/ POST（body.workspace=）皆可；live = running|idle|gone|unknown。
+    {
+      path: "/api/dsh-graph/agents",
+      handler: async (req, res) => {
+        try {
+          const body = req.method === "POST" ? await readBody(req) : {};
+          const r = rootForReq(req, body);
+          const out = collectAttemptAgents(r);
+          json(res, 200, { ok: true, workspace: dirname(r), graph_root: r, ...out });
+        } catch (e) {
+          const code = e instanceof GraphError ? 400 : 500;
+          json(res, code, { error: String(e?.message ?? e) });
+        }
+      },
+    },
     // g-374 F2/F3：重写 results.md（旧版归档）。
     // 两种来源，共用同一个 core 写入器（路径/归档/空态策略唯一真源），无需用户去命令行或会话下指令：
     //  ① `llm: true`（推荐，负责人反馈：重新摘要是用户主动触发的，可以用 LLM）⇒ 派发**专用摘要子代理**
@@ -3198,7 +3321,10 @@ export function apply(ctx, config) {
           const goal = String(body.goal ?? "").trim();
           if (!goal) return json(res, 400, { error: "missing goal" });
           const root = rootForReq(req, body);
-          // ① 普通路径：无附件/无绑定/无子代理时与旧行为完全一致（失败原样返回可操作错误码）
+          // ① 普通路径：无附件/无绑定/无子代理时与旧行为完全一致（失败原样返回可操作错误码）。
+          //    [v0.28] 问题 22 收尾确认：有执行绑定（attempt）的目标必然带 attempts 附件，
+          //    普通路径的 moveGoal 必然拒绝 → 真正的迁移只发生在 force 路径；因此**不在拒绝路径
+          //    提前停子代理**（负责人未确认 force 前不杀在跑的工作，保持拒绝零副作用）。
           try {
             moveGoal(root, goal, { to: "backlog", actor: "human:gui" });
             return json(res, 200, { ok: true, mode: "normal" });
@@ -3209,14 +3335,16 @@ export function apply(ctx, config) {
               return json(res, normalErr instanceof GraphError ? 400 : 500, errCode ? { error: message, code: errCode } : { error: message });
             }
           }
-          // ② force 路径：先尽力停掉该目标在跑的子代理（拿不到 child id 就跳过并记事件，不阻塞迁移）
+          // ② force 路径：先尽力停掉该目标在跑的子代理（先停再迁），拿不到 child id 就跳过并记事件。
+          //    [v0.28] 收尾补遗：绑定缺 parent_session_id 时回退用工作区 supervisor 会话
+          //    （GUI/autopilot 派发的 parentSessionId 本就是 supervisor 会话，旧绑定可能没落这个字段）。
           let childId = null;
           let stopNote = "no-binding";
           try {
             const binding = readGoalBinding(root, goal);
             if (binding?.child_id) {
               childId = binding.child_id;
-              const parentSessionId = binding.parent_session_id ?? null;
+              const parentSessionId = binding.parent_session_id ?? readSupervisorSession(root) ?? null;
               const subs = ctx.get?.("subagents");
               if (subs && typeof subs.interruptByParent === "function" && parentSessionId) {
                 subs.interruptByParent(childId, parentSessionId, "continuable");
@@ -3859,23 +3987,57 @@ export function apply(ctx, config) {
         try {
           if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
           const body = await readBody(req);
-          const { title, version, description, type, skill_refs, preset } = body;
+          const { title, version, description, type, skill_refs, preset, provider, model, context_len, extra_prompt } = body;
           if (!title || typeof title !== "string" || !title.trim()) {
             return json(res, 400, { error: "missing title" });
           }
           const r = rootForReq(req, body);
           const goalId = createGoal(r, { title: title.trim(), version, description, type, actor: "human:gui" });
           // [v0.18] 选用技能 / Agent 预设（不选则留空：派发时由执行 AI 自行判断）
+          // [v0.28] 问题 18：目标级执行设置（provider/model/context_len/extra_prompt）同口写入
           let extras = null;
           try {
-            if ((Array.isArray(skill_refs) && skill_refs.length) || (preset != null && String(preset).trim())) {
-              extras = setGoalExtras(r, goalId, { skill_refs, preset, actor: "human:gui" });
+            const hasExtras = (Array.isArray(skill_refs) && skill_refs.length)
+              || (preset != null && String(preset).trim())
+              || (provider != null && String(provider).trim())
+              || (model != null && String(model).trim())
+              || (context_len != null && String(context_len).trim() !== "")
+              || (extra_prompt != null && String(extra_prompt).trim());
+            if (hasExtras) {
+              extras = setGoalExtras(r, goalId, { skill_refs, preset, provider, model, context_len, extra_prompt, actor: "human:gui" });
             }
           } catch (e) {
             // 扩展字段失败不回滚已建目标（目标本体已落盘），但要把原因透出
             return json(res, 200, { ok: true, goal: goalId, extras_error: String(e?.message ?? e) });
           }
           json(res, 200, { ok: true, goal: goalId, extras });
+        } catch (e) {
+          const code = e instanceof GraphError ? 400 : 500;
+          json(res, code, { error: String(e?.message ?? e) });
+        }
+      },
+    },
+    // [v0.28] 问题 18：目标级执行设置端点（已存在的目标也能改）——
+    // body {goal, skill_refs?, preset?, provider?, model?, context_len?, extra_prompt?}
+    // 语义：未传（undefined）的字段保持现状；null / 空串清除；非空写入。
+    {
+      path: "/api/dsh-graph/goal-extras",
+      handler: async (req, res) => {
+        try {
+          if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+          const body = await readBody(req);
+          const goal = String(body.goal ?? "").trim();
+          if (!goal) return json(res, 400, { error: "missing goal" });
+          const out = setGoalExtras(rootForReq(req, body), goal, {
+            skill_refs: body.skill_refs,
+            preset: body.preset,
+            provider: body.provider,
+            model: body.model,
+            context_len: body.context_len,
+            extra_prompt: body.extra_prompt,
+            actor: "human:gui",
+          });
+          json(res, 200, out);
         } catch (e) {
           const code = e instanceof GraphError ? 400 : 500;
           json(res, code, { error: String(e?.message ?? e) });
@@ -4651,6 +4813,16 @@ export function apply(ctx, config) {
         const preset = autoPresetFor(`${doc.meta.title ?? ""} ${doc.body ?? ""}`);
         if (preset) briefParts.push(`【执行方式建议】本任务适合参考「${preset}」预设的专业方法执行（系统自动分析推荐；如有更合适的方式可自行判断）。`);
       }
+      // [v0.28] 问题 18：目标级执行设置注入 attempt brief
+      // —— context_len 以文字形式告知上下文预算；extra_prompt 作为独立段（负责人追加的执行要求）。
+      const goalContextLen = Number(doc?.meta?.agent_context_len);
+      if (Number.isFinite(goalContextLen) && goalContextLen > 0) {
+        briefParts.push(`【目标上下文预算】负责人为本目标设置的上下文预算约 ${Math.round(goalContextLen)} tokens，注意裁剪：不倾倒大文件全文，按需读取并摘要，把上下文花在与质量判据直接相关的材料上。`);
+      }
+      const goalExtraPrompt = doc?.meta?.agent_extra_prompt ? String(doc.meta.agent_extra_prompt) : "";
+      if (goalExtraPrompt) {
+        briefParts.push(`【负责人为本目标追加的执行要求（必须遵循）】\n${goalExtraPrompt}`);
+      }
       // [v0.19] 泳道职责提示词：告知执行子代理「这条泳道是干什么的」（后端/部署测试/交互…）
       try {
         const v = doc?.meta?.version;
@@ -4707,6 +4879,14 @@ export function apply(ctx, config) {
         const lm = laneModelFor(root, laneKey);
         if (lm) laneModelOverride = { provider: lm.provider, model: lm.model, reasoning_effort: lm.reasoning_effort };
       } catch { /* 读取失败则沿用全局配置 */ }
+      // [v0.28] 问题 18：目标级 provider/model 覆盖优先级 = 目标 meta（agent_provider/agent_model）
+      // > 泳道 laneModel > 全局（dispatchExecutionAttempt 的 overrides 参数即最高优先级通道）。
+      if (doc?.meta?.agent_provider && String(doc.meta.agent_provider).trim()) {
+        laneModelOverride.provider = String(doc.meta.agent_provider).trim();
+      }
+      if (doc?.meta?.agent_model && String(doc.meta.agent_model).trim()) {
+        laneModelOverride.model = String(doc.meta.agent_model).trim();
+      }
       const { supervisorId, parent } = resolveSpawnParent(root);
       try {
         const res = await dispatchExecutionAttempt({
@@ -4930,13 +5110,13 @@ export function apply(ctx, config) {
       // [v0.19] 主对话全控：一个工具覆盖自驾/泳道提示词/回收站/协作/管理员/目录的全部操作
       apControl: {
         name: "graph_ap_control",
-        description: "[autopilot] 主对话控制看板一切：泳道职责提示词、回收站（列出/恢复/彻底删除/回草稿）、协作频道、推荐与完整扫描、全局目标与全局提示词、评审模式、推荐管理员、技能与预设目录、当前状态。",
-        parameters: params({
-          action: {
-            type: "string",
-            description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|catalog_list|settings_get|settings_set|status",
-          },
-          settings: { type: "object", description: "[v0.27] settings_set 的设置对象（看板设置）：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels。profile 级设置（subagentProvider/subagentModel/subagentMode/subagentReasoningEffort/subagentPrompt/promptLanguage）由 DSH 设置页写入，本 action 不写并会在 skipped 里说明。" },
+            description: "[autopilot] 主对话控制看板一切：泳道职责提示词、回收站（列出/恢复/彻底删除/回草稿）、协作频道、推荐与完整扫描、全局目标与全局提示词、评审模式、推荐管理员、目标推进与全局托管、技能与预设目录、当前状态。",
+            parameters: params({
+              action: {
+                type: "string",
+                description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|steward_set|advance_mode_set|catalog_list|settings_get|settings_set|status",
+              },
+          settings: { type: "object", description: "[v0.28] settings_set 的设置对象（看板设置）：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels/advanceMode/steward({enabled})。profile 级设置（subagentProvider/subagentModel/subagentMode/subagentReasoningEffort/subagentPrompt/promptLanguage）由 DSH 设置页写入，本 action 不写并会在 skipped 里说明。" },
           lane: { type: "string", description: "泳道键（版本 slug / standalone / backlog / *）" },
           text: { type: "string", description: "文本（提示词 / 协作消息 / 全局目标 / 全局提示词）" },
           goal: { type: "string" }, dir: { type: "string" }, version: { type: "string" },
@@ -5011,6 +5191,25 @@ export function apply(ctx, config) {
               void spawnChild("graph:rec-manager", prompt, { on: () => {} }, root, { role: "pm" });
               return { ok: true, started: true };
             }
+            // [v0.28] 全局托管开关（text 传 "on"/"off"；只改 enabled，保留 lastScanAt/lastAdoptAt）
+            case "steward_set": {
+              const on = String(a.text ?? "").trim().toLowerCase() === "on";
+              const cur = readAutopilotState(root).steward;
+              const st1 = writeAutopilotState(root, {
+                steward: {
+                  ...(cur && typeof cur === "object" ? cur : {}),
+                  enabled: on,
+                  lastScanAt: (cur && cur.lastScanAt) ?? null,
+                  lastAdoptAt: (cur && cur.lastAdoptAt) ?? null,
+                },
+              }, { actor: autopilotActor(ex) });
+              return { ok: true, steward: st1.steward };
+            }
+            // [v0.28] 目标推进开关（text 传 "on"/"off"）
+            case "advance_mode_set": {
+              const on = String(a.text ?? "").trim().toLowerCase() === "on";
+              return { ok: true, advanceMode: writeAutopilotState(root, { advanceMode: on }, { actor: autopilotActor(ex) }).advanceMode === true };
+            }
             // [v0.27] 问题 21：设置对主对话完全开放 —— 读：看板(profile)设置 + autopilot 状态一次读全
             case "settings_get":
               return {
@@ -5021,7 +5220,8 @@ export function apply(ctx, config) {
               };
             // [v0.27] 问题 21：写看板设置（autopilot.json，与 GUI 设置面板同源）。
             // 可写字段（能在本文件确认写入路径的）：globalPrompt/globalGoal/autoPreset/reviewMode/
-            // managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels；
+            // managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels/
+            // [v0.28] advanceMode/steward；
             // profile 级设置（subagent*/promptLanguage）本插件只有读取能力，不写进 skipped 里如实说明。
             case "settings_set": {
               let src = (a.settings && typeof a.settings === "object" && !Array.isArray(a.settings)) ? { ...a.settings } : {};
@@ -5053,6 +5253,18 @@ export function apply(ctx, config) {
                 written.push("managerIntervalMin");
               }
               if (has("managerUpdateGlobals") && typeof src.managerUpdateGlobals === "boolean") { patch.managerUpdateGlobals = src.managerUpdateGlobals; written.push("managerUpdateGlobals"); }
+              // [v0.28] 目标推进 / 全局托管开关（与 /manager set、steward_set/advance_mode_set 同源）
+              if (has("advanceMode") && typeof src.advanceMode === "boolean") { patch.advanceMode = src.advanceMode; written.push("advanceMode"); }
+              if (has("steward") && src.steward && typeof src.steward === "object" && !Array.isArray(src.steward) && typeof src.steward.enabled === "boolean") {
+                const cur = readAutopilotState(root).steward;
+                patch.steward = {
+                  ...(cur && typeof cur === "object" ? cur : {}),
+                  enabled: src.steward.enabled,
+                  lastScanAt: (cur && cur.lastScanAt) ?? null,
+                  lastAdoptAt: (cur && cur.lastAdoptAt) ?? null,
+                };
+                written.push("steward");
+              }
               if (has("lanePrompts") && src.lanePrompts && typeof src.lanePrompts === "object" && !Array.isArray(src.lanePrompts)) {
                 const next = { ...(readAutopilotState(root).lanePrompts ?? {}) };
                 for (const [k, v] of Object.entries(src.lanePrompts)) {
@@ -5084,7 +5296,7 @@ export function apply(ctx, config) {
               if (!written.length) {
                 return {
                   ok: false,
-                  error: `settings_set 未写入任何字段。可写字段：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels；skipped：${skipped.join("；") || "无"}`,
+                  error: `settings_set 未写入任何字段。可写字段：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels/advanceMode/steward；skipped：${skipped.join("；") || "无"}`,
                   skipped,
                 };
               }
@@ -5450,6 +5662,11 @@ export function apply(ctx, config) {
                 globalPrompt: st.globalPrompt,
                 laneModels: st.laneModels ?? {},
                 reviewMode: st.reviewMode,
+                // [v0.28] 目标推进 / 全局托管开关
+                advanceMode: st.advanceMode === true,
+                steward: st.steward && typeof st.steward === "object"
+                  ? st.steward
+                  : { enabled: false, lastScanAt: null, lastAdoptAt: null },
               });
             }
             // [v0.19] 泳道职责提示词（告知执行子代理这条泳道是干什么的）
@@ -5490,8 +5707,20 @@ export function apply(ctx, config) {
               }
               // 评审模式也走这里（机审=auto 默认 / 人审=human）
               if (body.reviewMode === "auto" || body.reviewMode === "human") patch.reviewMode = body.reviewMode;
+              // [v0.28] 目标推进开关（boolean）
+              if (typeof body.advanceMode === "boolean") patch.advanceMode = body.advanceMode;
+              // [v0.28] 全局托管开关（{enabled:boolean}；只改 enabled，保留 lastScanAt/lastAdoptAt）
+              if (body.steward && typeof body.steward === "object" && !Array.isArray(body.steward) && typeof body.steward.enabled === "boolean") {
+                const cur = readAutopilotState(root).steward;
+                patch.steward = {
+                  ...(cur && typeof cur === "object" ? cur : {}),
+                  enabled: body.steward.enabled,
+                  lastScanAt: (cur && cur.lastScanAt) ?? null,
+                  lastAdoptAt: (cur && cur.lastAdoptAt) ?? null,
+                };
+              }
               const st = writeAutopilotState(root, patch, { actor: "human:gui" });
-              return json(res, 200, { ok: true, managerPrompt: st.managerPrompt, managerEnabled: st.managerEnabled, managerIntervalMin: st.managerIntervalMin, managerUpdateGlobals: st.managerUpdateGlobals, reviewMode: st.reviewMode });
+              return json(res, 200, { ok: true, managerPrompt: st.managerPrompt, managerEnabled: st.managerEnabled, managerIntervalMin: st.managerIntervalMin, managerUpdateGlobals: st.managerUpdateGlobals, reviewMode: st.reviewMode, advanceMode: st.advanceMode === true, steward: st.steward ?? { enabled: false, lastScanAt: null, lastAdoptAt: null } });
             }
             if (action === "run") {
               const ws = workspaceOf(req, body) ?? dirname(root);
@@ -5557,6 +5786,111 @@ export function apply(ctx, config) {
               }
             }
           } catch { /* 阻塞自愈失败不影响定时器 */ }
+          // ═══ [v0.28] 目标推进 / 全局托管（阻塞自愈之后、按意图恢复之后每轮执行） ═══
+          // 目标推进（advanceMode）：对每个「有未完结目标」的泳道确保 runner 在跑（每轮最多起 1 个，10 分钟冷却）。
+          // 全局托管（steward.enabled）：包含推进模式全部行为，另含推荐自动扫描（空清单 15 分钟一扫）
+          // 与自动采纳（推荐非空且无 runner 在跑时采纳第 1 条到「建议泳道」，10 分钟冷却）。
+          // 两个模式都**永不自动停止**：开关关闭时只是不再进入本段（不杀在跑的 runner，不再推进/不再采纳）。
+          try {
+            const steward = st.steward && typeof st.steward === "object" ? st.steward : null;
+            const stewardOn = steward?.enabled === true;
+            const wantAdvance = st.advanceMode === true || stewardOn;
+            // —— 推进：确保「有未完结目标」的泳道有 runner 在跑 ——
+            if (wantAdvance && !autopilotRunners.get(r)) {
+              const openLanes = listLanesWithOpenGoals(r);
+              if (openLanes.length) {
+                const lastTry = advanceStartAttempts.get(r) ?? 0;
+                if (Date.now() - lastTry > 10 * 60_000) {
+                  advanceStartAttempts.set(r, Date.now()); // 无论成败都进冷却：绝不反复冲击派发
+                  const lane = openLanes[0].lane;
+                  let started = null;
+                  let startErr = null;
+                  try {
+                    started = autopilotStart(r, lane, st.reviewMode, "system:autopilot");
+                  } catch (se) {
+                    startErr = String(se?.message ?? se).slice(0, 300);
+                  }
+                  appendEvent(r, {
+                    actor: "system:autopilot",
+                    event: "autopilot.steward_acted",
+                    details: {
+                      kind: "advance",
+                      mode: stewardOn ? "steward" : "advance",
+                      ok: !startErr,
+                      lane,
+                      open_lanes: openLanes.length,
+                      queue: Array.isArray(started?.queue) ? started.queue.length : null,
+                      error: startErr,
+                    },
+                  });
+                  if (startErr) autopilotLog(`推进模式起跑 ${lane} 失败（10 分钟后重试）：${startErr}`);
+                }
+              }
+            }
+            // —— 托管专属：推荐自动扫描 + 自动采纳到建议泳道 ——
+            if (stewardOn) {
+              try { ensureGroups(r); } catch { /* 建议泳道落点兜底失败不阻断 */ }
+              const nowMs = Date.now();
+              let recs = readRecommendations(r);
+              // a) 推荐清单为空 → 自动扫描（15 分钟冷却）
+              if (!recs.length) {
+                const lastScan = steward.lastScanAt ? Date.parse(steward.lastScanAt) : 0;
+                if (!Number.isFinite(lastScan) || nowMs - lastScan > 15 * 60_000) {
+                  let fresh = [];
+                  let scanErr = null;
+                  try {
+                    fresh = scanRecommendations(r, { globalGoalText: st.globalGoal?.text ?? null });
+                    saveRecommendations(r, fresh, { actor: "system:autopilot" });
+                  } catch (se) {
+                    scanErr = String(se?.message ?? se).slice(0, 300);
+                  }
+                  writeAutopilotState(r, { steward: { ...steward, lastScanAt: new Date().toISOString() } }, { actor: "system:autopilot" });
+                  appendEvent(r, {
+                    actor: "system:autopilot",
+                    event: "autopilot.steward_acted",
+                    details: { kind: "scan", ok: !scanErr, count: Array.isArray(fresh) ? fresh.length : 0, error: scanErr },
+                  });
+                  recs = Array.isArray(fresh) ? fresh : [];
+                }
+              }
+              // b) 推荐非空且在跑泳道数 < 2 → 采纳第 1 条到「建议泳道」并起跑（10 分钟冷却）。
+              //    当前架构 autopilotRunners 是 root→runner 单槽（同工作区同时最多 1 条泳道在跑），
+              //    因此本判定等价于「当前没有 runner」——避免已有 runner 时反复采纳同一条推荐造成重复目标。
+              const runningLanes = autopilotRunners.has(r) ? 1 : 0;
+              if (recs.length && runningLanes < 2 && !autopilotRunners.get(r)) {
+                const lastAdopt = steward.lastAdoptAt ? Date.parse(steward.lastAdoptAt) : 0;
+                if (!Number.isFinite(lastAdopt) || nowMs - lastAdopt > 10 * 60_000) {
+                  const first = recs[0] ?? {};
+                  const lane = stewardLaneFor(`${first.title ?? ""} ${first.description ?? ""}`);
+                  let adoptedGoal = null;
+                  let adoptErr = null;
+                  let startErr = null;
+                  try {
+                    const adopted = adoptRecommendations(r, [1], { version: lane, actor: "system:autopilot" });
+                    adoptedGoal = adopted?.created?.[0]?.id ?? null;
+                  } catch (ae) {
+                    adoptErr = String(ae?.message ?? ae).slice(0, 300);
+                  }
+                  if (!adoptErr && adoptedGoal) {
+                    try {
+                      autopilotStart(r, lane, st.reviewMode, "system:autopilot");
+                    } catch (se) {
+                      startErr = String(se?.message ?? se).slice(0, 300);
+                    }
+                  }
+                  writeAutopilotState(r, { steward: { ...steward, lastAdoptAt: new Date().toISOString() } }, { actor: "system:autopilot" });
+                  appendEvent(r, {
+                    actor: "system:autopilot",
+                    event: "autopilot.steward_acted",
+                    details: { kind: "adopt", ok: !adoptErr && !startErr, lane, goal: adoptedGoal, error: adoptErr ?? startErr },
+                  });
+                  autopilotLog(adoptErr || startErr
+                    ? `托管采纳 ${first.title ?? "?"} → ${lane} 未完全成功：${adoptErr ?? startErr}`
+                    : `托管采纳 ${first.title ?? "?"} → ${lane}（goal=${adoptedGoal}）并起跑`);
+                }
+              }
+            }
+          } catch { /* 推进/托管模式失败不影响定时器 */ }
           if (!st.managerEnabled) continue;
           const last = st.managerLastRun ? Date.parse(st.managerLastRun) : 0;
           const intervalMs = Math.max(1, Number(st.managerIntervalMin) || 30) * 60_000;

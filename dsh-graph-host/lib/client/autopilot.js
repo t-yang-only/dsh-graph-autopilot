@@ -87,14 +87,16 @@ function LaneRunButton(props) {
     return () => { apRunSubs.delete(s); };
   }, []);
   const running = !!version && st.version === version;
-  const base = { ...AP_ROW_BTN, position: "absolute", right: 34, top: 8, bottom: "auto", fontSize: 11, padding: "0 5px", lineHeight: 1.4 };
+  // [v0.28] 问题(P1)：按钮只用图标——原「■ 运行中」文字太宽，绝对定位在行头右侧会盖住「后端/交互」等泳道标题。
+  // 运行中=绿色「■」（title 说明点此中断），未运行=灰「▶」；padding 收窄为 "0 4px"。位置约定不变（right:34，旁边 right:6 是「＋」）。
+  const base = { ...AP_ROW_BTN, position: "absolute", right: 34, top: 8, bottom: "auto", fontSize: 11, padding: "0 4px", lineHeight: 1.4 };
   return h("button", {
     style: running ? { ...base, background: "#2e9e5b", borderColor: "#2e9e5b", color: "#fff", fontWeight: 700 } : base,
     className: "dg-btn",
     "data-ap-run-btn": version,
-    title: running ? `「${version}」正在自动驾驶中（点此中断）` : "自动驾驶本行：逐目标 收集→执行→评审→交付",
+    title: running ? "运行中：点此中断" : "自动驾驶本行：逐目标 收集→执行→评审→交付",
     onClick: (e) => { e.stopPropagation(); if (running) apStopLane(label); else apRunLane(version, label); },
-  }, running ? "■ 运行中" : "▶");
+  }, running ? "■" : "▶");
 }
 
 /** [v0.20] 行自带 ▶：直接在这个泳道行上启动自动驾驶（不用回面板） */
@@ -334,21 +336,22 @@ function AutopilotPanel(props) {
     "data-autopilot-panel": "",
     style: { display: "flex", flexDirection: "column", gap: 8, margin: "14px 0 10px", padding: "10px 12px", borderRadius: 10, border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", background: "var(--dsw-alias-fill-tsp-primary, rgba(128,128,128,.06))", fontSize: 12 },
   },
-    // —— 推荐行（标准卡片，可拖进泳道）—— [v0.27] 可折叠（点标题行或「收起/展开」按钮，默认展开）——
+    // —— 推荐行（标准卡片，可拖进泳道）—— [v0.28] 问题20修复：折叠只隐藏**推荐卡片网格**，
+    // 标题行 + 全部操作按钮（含输入框）保持常显；折叠态标题显示「💡 推荐（已收起）· N 条」。
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", {
         style: { flexShrink: 0, cursor: "pointer", userSelect: "none" },
-        title: "点此展开 / 收起推荐列表",
+        title: "点此展开 / 收起推荐卡片（操作按钮始终保留）",
         onClick: () => setRecsOpen((o) => !o),
-      }, (recsOpen ? "▾ " : "▸ ") + "💡 推荐"),
+      }, recsOpen ? "▾ 💡 推荐" : "▸ 💡 推荐（已收起）· " + recs.length + " 条"),
       h("button", {
         style: btn,
-        title: "展开 / 收起推荐列表与操作按钮",
+        title: "展开 / 收起推荐卡片（操作按钮始终保留）",
         onClick: () => setRecsOpen((o) => !o),
       }, recsOpen ? "收起" : "展开"),
-      h("span", { style: chip }, recs.length + " 条"),
-      !recsOpen && h("span", { className: "dg-hint", style: { opacity: 0.65 } }, "已收起；点标题或「展开」查看、勾选与采纳推荐"),
-      recsOpen && h(React.Fragment, null,
+      recsOpen && h("span", { style: chip }, recs.length + " 条"),
+      !recsOpen && h("span", { className: "dg-hint", style: { opacity: 0.65 } }, "已收起：只隐藏推荐卡片，操作按钮常显；点标题或「展开」查看卡片"),
+      h(React.Fragment, null,
         h("button", { style: btn, disabled: !!busy, onClick: () => post("scan", {}).then(load) }, busy === "scan" ? "扫描中…" : "扫描推荐"),
         h("button", {
           style: btn, disabled: !!busy,
@@ -440,7 +443,7 @@ function AutopilotPanel(props) {
       runner
         ? h("span", { style: chip }, `执行中: ${runner.version} · 当前 ${runner.current ?? "—"} · 待办 ${(runner.pending ?? []).length} · 完成 ${(runner.done ?? []).length}${(runner.failed ?? []).length ? " · 失败 " + runner.failed.length : ""}${runner.paused ? " · ⏸ " + runner.paused : ""}`)
         : h("span", { style: { opacity: 0.6 } }, "▶ 当前未在运行"),
-      h("span", { className: "dg-hint" }, runner ? "（在泳道行头点「■ 运行中」即可中断）" : "（在泳道行头点 ▶ 启动本行自动驾驶）"),
+      h("span", { className: "dg-hint" }, runner ? "（在泳道行头点绿色「■」即可中断）" : "（在泳道行头点灰色「▶」启动本行自动驾驶）"),
       // [v0.18] 评审模式：默认机审（机器门禁后自动裁决）；切到人审则停在「确认」等人
       h("span", { style: chip }, "评审"),
       h("select", {
@@ -469,6 +472,29 @@ function AutopilotPanel(props) {
     ),
     // [v0.27] 「⚙ 高级」（无提示模式 + 按泳道选模型）已整体迁至看板设置（问题 16/23）；
     // noHints/laneDraft 状态与相关 setter 随块删除，apApplyNoHints/apNoHintsOn/apHint 机制函数保留。
+    // —— [v0.28] 🌐 托管 / 目标推进（面板开关行）——
+    // 数据契约：POST /api/dsh-graph-autopilot/manager {action:"set", steward:{enabled}|advanceMode}；读回 get 的 steward?.enabled 与 advanceMode。
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+      h("strong", { style: { flexShrink: 0 } }, "🌐 托管"),
+      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
+        h("input", {
+          type: "checkbox", checked: !!mgr?.steward?.enabled,
+          title: "全局托管：自动扫描/采纳/起跑并处理阻塞，持续不停（勾选即生效）",
+          onChange: (e) => mgrSet({ steward: { enabled: e.target.checked } }),
+        }),
+        "全局托管（自动扫描/采纳/起跑，持续不停）",
+      ),
+      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
+        h("input", {
+          type: "checkbox", checked: !!mgr?.advanceMode,
+          title: "目标推进：不加新任务，把非草稿任务全部推到交付（勾选即生效）",
+          onChange: (e) => mgrSet({ advanceMode: e.target.checked }),
+        }),
+        "目标推进（不加新任务，推进到全部交付）",
+      ),
+    ),
+    apHint("🌐 全局托管：勾选后自动扫描/采纳/起跑并处理阻塞，持续不停、永不自动停；取消勾选即回到手动操作。"),
+    apHint("🌐 目标推进：勾选后不加新任务，只把非草稿任务全部推进到交付；取消勾选即恢复常规托管行为。"),
     // —— [v0.18] AI 推荐管理员（独立上行文；实时管理推荐 / 全局目标 / 全局提示词）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "🤖 推荐管理"),
@@ -1219,7 +1245,7 @@ function LinksLayer(props) {
   // rAF 节流（无 requestAnimationFrame 的极早期环境退化为 ~16ms 定时器）
   const raf = (cb) => (typeof requestAnimationFrame === "function" ? requestAnimationFrame(cb) : setTimeout(cb, 16));
   const caf = (id) => { try { if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(id); } catch { /* ignore */ } try { clearTimeout(id); } catch { /* ignore */ } };
-  /** [v0.27] 坐标命中：捕获层盖在视口最上面（e.target 恒为自身）→ 只能用 elementsFromPoint 找卡片 */
+  /** [v0.28] 坐标命中：连线交互走 document 捕获阶段监听（无捕获层，e.target 可能是任意元素）→ 统一用 elementsFromPoint 找卡片 */
   const cardAt = (x, y) => {
     try {
       const stack = document.elementsFromPoint(x, y) || [];
@@ -1269,35 +1295,65 @@ function LinksLayer(props) {
     restoreHover();
   }, []);
 
-  const onClickCard = (e) => {
-    if (mode === "idle") return;
-    // ⚠️ 捕获层盖在整个视口上，e.target 永远是本层自身 → 必须用坐标命中测试找卡片
-    const el = cardAt(e.clientX, e.clientY);
-    if (!el) {           // 空白处点击 = 取消已选起点（回到空闲也不退出模式）
-      if (pending) { setPending(null); setMsg("已取消起点选择"); }
-      return;
-    }
-    const id = el.getAttribute("data-goal-id");
-    e.preventDefault();
-    e.stopPropagation();
-    if (mode === "erase") return;
-    const rect = el.getBoundingClientRect();
-    const rel = (e.clientY - rect.top) / Math.max(1, rect.height);
-    const kind = rel < 0.33 ? "start" : rel > 0.66 ? "end" : "mid";
-    if (!pending) { setPending({ id, kind }); setMsg(`起点 ${id}（${AP_LINK_KINDS[kind].label}）→ 再点终点`); return; }
-    if (pending.id === id) { setPending(null); setMsg("已取消起点选择"); return; }
-    const body = { workspace, action: "add", from: pending.id, to: id, kind: pending.kind };
-    fetch("/api/dsh-graph-autopilot/links", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
-      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
-      .then(({ ok, d }) => {
-        if (!ok) { setMsg("❌ " + (d?.error ?? "连线失败")); return; }
-        setLinks(Array.isArray(d.links) ? d.links : []);
-        setMsg(`✅ 已建立 ${AP_LINK_KINDS[pending.kind].label}：${pending.id} → ${id}`);
-        window.dispatchEvent(new CustomEvent("autopilot:links-changed"));
-      })
-      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
-      .finally(() => setPending(null));
-  };
+  // [v0.28] 新问题修复：连线模式退不出来（鼠标一直画笔、按钮点不到）。
+  // 根因：原全屏点击捕获层（pointerEvents:auto, zIndex 6）盖住了包括头部工具条在内的所有东西，
+  // portal 到 .dg-head 的「✖ 退出连线」按钮被压在下面点不到。
+  // 改法：删掉全屏捕获层，改用 document 级捕获阶段监听（随连线模式挂/卸）：
+  //   click：elementsFromPoint 命中 [data-goal-id] → preventDefault+stopPropagation 拦住卡片原有 onClick，
+  //          走选起点/完成连线；未命中且有 pending → 取消 pending（不吞事件）；未命中且无 pending → 不动作。
+  //   mousemove：悬停高亮/锚点提示/预览线（复用 onLayerMove，事件源换成 document）。
+  // 光标：不再全屏 crosshair；挂模式时给 documentElement 设 data-ap-linking="1" 并注入一次性样式
+  //   [data-ap-linking] [data-goal-id]{cursor:crosshair}（只对卡片生效，其它地方正常光标）。
+  // 擦除模式不挂监听：「点线删除」由连线 SVG 自身的 onClick 完成，卡片/工具条保持正常交互。
+  React.useEffect(() => {
+    if (mode !== "link" || typeof document === "undefined") return undefined;
+    try {
+      if (!document.getElementById("dsh-graph-ap-linking-style")) {
+        const s = document.createElement("style");
+        s.id = "dsh-graph-ap-linking-style";
+        s.textContent = "[data-ap-linking] [data-goal-id]{cursor:crosshair}";
+        document.head.appendChild(s);
+      }
+      document.documentElement.setAttribute("data-ap-linking", "1");
+    } catch { /* 极早期环境忽略 */ }
+    const onClickDoc = (e) => {
+      const el = cardAt(e.clientX, e.clientY);
+      if (!el) {           // 空白处点击 = 取消已选起点；不吞事件（「✖ 退出连线」等按钮照常工作）
+        if (pending) { setPending(null); setMsg("已取消起点选择"); }
+        return;
+      }
+      e.preventDefault(); // 拦住卡片原有 onClick（仅当点在目标卡片上）
+      e.stopPropagation();
+      const id = el.getAttribute("data-goal-id");
+      const rect = el.getBoundingClientRect();
+      const rel = (e.clientY - rect.top) / Math.max(1, rect.height);
+      const kind = rel < 0.33 ? "start" : rel > 0.66 ? "end" : "mid";
+      if (!pending) { setPending({ id, kind }); setMsg(`起点 ${id}（${AP_LINK_KINDS[kind].label}）→ 再点终点`); return; }
+      if (pending.id === id) { setPending(null); setMsg("已取消起点选择"); return; }
+      const body = { workspace, action: "add", from: pending.id, to: id, kind: pending.kind };
+      fetch("/api/dsh-graph-autopilot/links", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+        .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+          if (!ok) { setMsg("❌ " + (d?.error ?? "连线失败")); return; }
+          setLinks(Array.isArray(d.links) ? d.links : []);
+          setMsg(`✅ 已建立 ${AP_LINK_KINDS[pending.kind].label}：${pending.id} → ${id}`);
+          window.dispatchEvent(new CustomEvent("autopilot:links-changed"));
+        })
+        .catch((e2) => setMsg("❌ " + (e2?.message ?? "网络错误")))
+        .finally(() => setPending(null));
+    };
+    document.addEventListener("click", onClickDoc, true);
+    document.addEventListener("mousemove", onLayerMove, true);
+    document.addEventListener("mouseleave", onLayerLeave);
+    return () => {
+      document.removeEventListener("click", onClickDoc, true);
+      document.removeEventListener("mousemove", onLayerMove, true);
+      document.removeEventListener("mouseleave", onLayerLeave);
+      // 退出连线模式/卸载：移除光标属性（被高亮卡片的原样式由上方 mode 副作用与卸载兜底还原）
+      try { document.documentElement.removeAttribute("data-ap-linking"); } catch { /* ignore */ }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, pending, workspace]);
 
   const erase = (id, e) => {
     e.stopPropagation();
@@ -1423,15 +1479,10 @@ function LinksLayer(props) {
         style: { pointerEvents: "none" },
       }, AP_LINK_KINDS[hoverCard.kind].label),
     ),
-    // 点击捕获层：连线模式下拦下卡片点击（注意只吞掉落在卡片上的点击）
-    // [v0.27] 同时承载连线模式的悬停反馈（光标位置 → 卡片高亮/锚点/预览线）；擦除模式保持
-    // pointerEvents:none（不遮挡连线点击），其悬停提示由每条连线自身的 onMouseEnter/Leave 提供。
-    mode === "idle" ? null : h("div", {
-      style: { position: "absolute", inset: 0, pointerEvents: mode === "erase" ? "none" : "auto", cursor: "crosshair" },
-      onClick: onClickCard,
-      onMouseMove: mode === "link" ? onLayerMove : undefined,
-      onMouseLeave: mode === "link" ? onLayerLeave : undefined,
-    }),
+    // [v0.28] 原全屏点击捕获层已删除：它（pointerEvents:auto, zIndex 6）会盖住包括头部工具条在内的所有元素，
+    // 导致 portal 到 .dg-head 的「✖ 退出连线 / ✖ 退出擦除」按钮点不到（连线模式退不出来）。
+    // 连线交互改为 document 捕获阶段监听（见上方 useEffect）；本层只剩连线 SVG（pointerEvents:none，
+    // 不遮挡任何点击），擦除模式的「点线删除」由每条连线自身的 onClick 承担，不受影响。
     // 工具条：**放进看板自身的头部工具行**（.dg-head，与 刷新/标签筛选/记忆/项目知识库/已归档 同一行），
     // 用 ReactDOM.createPortal 挂进去；极早期（头部还没渲染）时退化为层内展示。
     // 头部已存在 → portal 到工具行；否则退化为层内展示
