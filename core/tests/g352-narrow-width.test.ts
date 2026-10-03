@@ -1780,7 +1780,7 @@ test("g-352 att-006 B2（渲染级）：角落改单行 [🏷️] [创建版本]
   assert.equal(corner.props.style.alignItems, "center", "同一行内垂直居中对齐（两按钮 y 相同）");
   assert.equal(corner.props.style.justifyContent, "flex-start", "靠左对齐");
   const cornerKids = (corner.children || []).flat(Infinity) as any[];
-  assert.equal(cornerKids.length, 2, `角落恰好两颗按钮（实得 ${cornerKids.length}）`);
+  assert.equal(cornerKids.length, 3, `角落三颗按钮 [🏷️][创建版本][创建功能]（实得 ${cornerKids.length}）`);
   assert.equal(cornerKids[0], vm, "版本管理图标按钮是同一 flex 行的第 1 个子项");
   assert.equal(cornerKids[1], cv, "创建版本按钮是同一 flex 行的第 2 个子项");
   // 行高 = 单行 max(子项高) = 26（改前纵向堆叠 = 26 + gap 4 + 26 = 56 ⇒ 本次不增反降）

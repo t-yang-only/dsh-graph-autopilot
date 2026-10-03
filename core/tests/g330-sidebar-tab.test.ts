@@ -157,7 +157,7 @@ const byName = (l: Loaded, name: string) => l.registered.filter((r) => r.def?.na
 
 test("g-330 判据1：右侧栏注册类型（id/kind 带命名空间、thunk 文案、guide 图标+标题+描述）", () => {
   const { tabTypes } = loadAndApplyClient();
-  assert.equal(tabTypes.length, 1, "恰好注册一个右侧栏 tab 类型");
+  assert.equal(tabTypes.length, 2, "注册两个右侧栏 tab 类型（看板 + 任务执行板）");
   const def = tabTypes[0];
   assert.equal(def.id, SIDEBAR_ID, "id 用包名（全局唯一）");
   assert.equal(def.kind, SIDEBAR_ID, "kind 必须带命名空间，不得用朴素 graph/kanban/context");
@@ -166,7 +166,7 @@ test("g-330 判据1：右侧栏注册类型（id/kind 带命名空间、thunk �
   assert.notEqual(def.kind, "context");
   assert.equal(typeof def.title, "function", "页签标题必须是 thunk（切语言重算）");
   assert.equal(typeof def.title({}), "string");
-  assert.ok(Array.isArray(def.guide) && def.guide.length === 1, "guide 页恰好一条入口");
+  assert.ok(Array.isArray(def.guide) && def.guide.length === 2, "guide 页两条入口（看板 + 任务执行板）");
   const entry = def.guide[0];
   assert.equal(entry.id, SIDEBAR_ID);
   assert.equal(entry.order, 20, "排在宿主内置 Files 条目（order 10）之后");
@@ -317,7 +317,7 @@ test("g-330 判据6：注册表抛异常（id/kind 被占）时不冒泡，且�
   const l = loadAndApplyClient({ tabsRegisterThrows: true });
   assert.equal(l.tabTypes.length, 0);
   assert.deepEqual(l.registered.map((r) => r.def?.name).filter((n) => String(n).startsWith("sidebar.right")), []);
-  assert.equal(byName(l, "conversation.view").length, 1, "会话内看板不受影响");
+  assert.equal(byName(l, "conversation.view").length, 2, "会话内两个页签（看板 + 任务执行板）");
 });
 
 test("g-330 判据6：本体 seat 注册失败时撤销已成功的类型注册（不留半套）", () => {
@@ -342,8 +342,8 @@ test("g-330 判据7：i18n 页签/guide 文案中英齐备且英文无 CJK", () 
   for (const key of ["sidebar.tab.title", "sidebar.guide.description"]) {
     assert.equal([...src.matchAll(new RegExp(`'${key.replace(/\./g, "\\.")}':`, "g"))].length, 2, `${key} 必须在 zh/en 各出现一次`);
   }
-  assert.match(src, /'sidebar\.tab\.title': '看板'/);
-  assert.match(src, /'sidebar\.tab\.title': 'Kanban'/);
+  assert.match(src, /'sidebar\.tab\.title': '任务台'/);
+  assert.match(src, /'sidebar\.tab\.title': 'Task Board'/);
   // 英文条目必须是无 CJK 的英文串（中文条目在 zh 段，分开断言，避免自伤）
   assert.match(src, /'sidebar\.guide\.description': 'View and manage the goal board in this session'/);
   const enBlock = src.slice(src.indexOf("const en = {"));

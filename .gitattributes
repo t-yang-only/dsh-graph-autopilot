@@ -1,0 +1,5 @@
+# 统一行尾为 LF：源码契约测试大量使用逐字/正则比对，CRLF 会让它们在 Windows 上误红。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.tgz binary

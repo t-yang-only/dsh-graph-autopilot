@@ -2444,7 +2444,7 @@ test("g-224 行为模拟：关闭实时显示时停止流式行读取（line=nul
 test("g-214 源契约：helpers.js 包含刷新间隔存取与纠偏函数 + RefreshCountdown 局部化组件", () => {
   const helpers = readFileSync(join(import.meta.dirname, "../../dsh-graph-host/lib/client/helpers.js"), "utf8");
   assert.match(helpers, /REFRESH_INTERVAL_KEY = "dsh-graph\.refresh-interval"/);
-  assert.match(helpers, /MIN_REFRESH_INTERVAL = 5/);
+  assert.match(helpers, /MIN_REFRESH_INTERVAL = 1/);
   assert.match(helpers, /DEFAULT_REFRESH_INTERVAL = 15/);
   assert.match(helpers, /function getRefreshInterval\(\)/);
   assert.match(helpers, /function setRefreshInterval\(val\)/);
@@ -2470,7 +2470,7 @@ test("g-214 生成 bundle 契约：client.js 包含 g-214 倒计时与刷新间�
   const bundle = readFileSync(join(import.meta.dirname, "../../dist/lib/client.js"), "utf8");
   assert.match(bundle, /RefreshCountdown/);
   assert.match(bundle, /dsh-graph\.refresh-interval/);
-  assert.match(bundle, /MIN_REFRESH_INTERVAL = 5/);
+  assert.match(bundle, /MIN_REFRESH_INTERVAL = 1/);
 });
 
 // ===== g-216：widthHandle 层级与 z-index 防遮挡/防穿透契约 =====
