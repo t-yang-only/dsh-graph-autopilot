@@ -203,6 +203,10 @@ import {
   ensureGroups,
   listGroups,
   isDefaultGroup,
+  laneModelFor,
+  listStacks,
+  stackTrashItems,
+  unstackTrash,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -4405,6 +4409,24 @@ export function apply(ctx, config) {
     // 评审语义由 reviewMode 决定：auto=机器裁决（automation=ai 全自动）；human=停在 review 等人。
     // 全局提示词注入每个 attempt 的 attempt_brief；autoPreset 分析任务文本给出预设建议（advisory）。
     const autopilotRunners = new Map(); // root -> runner
+    // [v0.26] 行执行意图持久化：DSH 重启/进程被杀后，靠它在中控定时器里**自动恢复运行**（问题 9）
+    const RUNNER_INTENT_FILE = "autopilot-runner.json";
+    const writeRunnerIntent = (root, r) => {
+      try {
+        writeFileSync(join(root, RUNNER_INTENT_FILE), JSON.stringify({ version: r.version, reviewMode: r.reviewMode ?? null, startedAt: new Date().toISOString() }, null, 2) + "\n", "utf8");
+      } catch { /* 持久化失败不影响运行 */ }
+    };
+    const clearRunnerIntent = (root) => {
+      try { rmSync(join(root, RUNNER_INTENT_FILE), { force: true }); } catch { /* 忽略 */ }
+    };
+    const readRunnerIntent = (root) => {
+      try {
+        const f = join(root, RUNNER_INTENT_FILE);
+        if (!existsSync(f)) return null;
+        const d = JSON.parse(readFileSync(f, "utf8"));
+        return d && d.version ? { version: String(d.version), reviewMode: d.reviewMode ?? null } : null;
+      } catch { return null; }
+    };
     const autopilotLog = (msg) => process.stderr.write(`[dsh-graph-autopilot] ${msg}\n`);
     const autopilotActor = (ex) => {
       const sid = ex?.agent?.session?.id ?? ex?.agent?.id ?? null;
@@ -4431,6 +4453,7 @@ export function apply(ctx, config) {
       if (r.timer) clearTimeout(r.timer);
       if (r.poll) clearInterval(r.poll);
       autopilotRunners.delete(root);
+      clearRunnerIntent(root); // [v0.26] 清除运行意图（手动停止/跑完 → 不再自动恢复）
       appendEvent(root, { actor: "system:autopilot", event: "autopilot.lane_finished", details: { version: r.version, reason, done: r.done, failed: r.failed } });
       autopilotLog(`泳道 ${r.version} 结束（${reason}）：完成 ${r.done.length}，失败 ${r.failed.length}`);
     }
@@ -4567,6 +4590,14 @@ export function apply(ctx, config) {
           briefParts.push("【开工纪律】改动文件前用 graph_collab_post 声明你要动的文件（claims 参数），避免与并行任务冲突；收工用 graph_collab_post 发 kind=release 释放声明。");
         }
       } catch { /* 协作频道不可用不阻断派发 */ }
+      // [v0.25] 按泳道选模型：本目标的泳道若配置了模型路由，覆盖全局 executor 配置
+      let laneModelOverride = {};
+      try {
+        const v = doc?.meta?.version;
+        const laneKey = v === undefined ? "backlog" : (v === null ? "standalone" : String(v));
+        const lm = laneModelFor(root, laneKey);
+        if (lm) laneModelOverride = { provider: lm.provider, model: lm.model, reasoning_effort: lm.reasoning_effort };
+      } catch { /* 读取失败则沿用全局配置 */ }
       const { supervisorId, parent } = resolveSpawnParent(root);
       try {
         const res = await dispatchExecutionAttempt({
@@ -4580,11 +4611,13 @@ export function apply(ctx, config) {
           parentSessionId: supervisorId,
           attempt_brief: briefParts.length ? briefParts.join("\n\n") : undefined,
           signal: controller.signal,
+          ...laneModelOverride,
           force: false,
         });
         if (res?.child_id) {
           r.current.childId = res.child_id;
-          r.timer = setTimeout(() => autopilotTimeout(root), 45 * 60 * 1000);
+          // [v0.26] 问题 11：一旦开跑就跑到交付，不中途掐断——超时阈值从 45 分钟放宽到 6 小时（真正的停止只由手动 ⏸ 或跑完触发）
+          r.timer = setTimeout(() => autopilotTimeout(root), 6 * 60 * 60 * 1000);
           if (r.timer.unref) r.timer.unref();
           autopilotLog(`attempt 已派发 goal=${nextId} child=${res.child_id}（队列剩余 ${r.queue.length}）`);
         } else {
@@ -4610,6 +4643,7 @@ export function apply(ctx, config) {
         stopped: false, paused: null, timer: null, poll: null,
       };
       autopilotRunners.set(root, r);
+      writeRunnerIntent(root, r); // [v0.26] 持久化运行意图（重启后自动恢复）
       appendEvent(root, { actor: actor ?? "system:autopilot", event: "autopilot.lane_started", details: { version, queue: plan.runnable, reviewMode: r.reviewMode } });
       autopilotStartPolling(root);
       void autopilotDispatchNext(root);
@@ -4632,6 +4666,7 @@ export function apply(ctx, config) {
       if (r.poll) clearInterval(r.poll);
       const snapshot = { version: r.version, done: r.done, failed: r.failed, pending: [r.current?.goalId, ...r.queue].filter(Boolean) };
       autopilotRunners.delete(root);
+      clearRunnerIntent(root); // [v0.26] 清除运行意图（手动停止/跑完 → 不再自动恢复）
       appendEvent(root, { actor: actor ?? "system:autopilot", event: "autopilot.lane_stopped", details: snapshot });
       return { ok: true, ...snapshot };
     }
@@ -4796,7 +4831,10 @@ export function apply(ctx, config) {
           from: { type: "string", description: "连线起点目标 id" }, to: { type: "string", description: "连线终点目标 id" },
           id: { type: "string", description: "连线 id（删除用）" },
           kind: { type: "string", description: "连线类型：start=开始连接 / end=结束连接 / mid=实时协作连接" },
-          note: { type: "string", description: "连线备注" },
+          note: { type: "string", description: "连线备注 / 堆叠名称" },
+          model: { type: "string", description: "模型 id（lane_model_set 用）" },
+          reasoning_effort: { type: "string", description: "推理强度（lane_model_set 用，可空）" },
+          items: { type: "array", description: "堆叠条目：[{kind:'goal'|'version', key:'目标id或回收站目录名'}]" },
           reviewMode: { type: "string" }, managerPrompt: { type: "string" },
           managerEnabled: { type: "boolean" }, managerIntervalMin: { type: "number" },
           managerUpdateGlobals: { type: "boolean" }, confirm: { type: "boolean" },
@@ -4863,6 +4901,18 @@ export function apply(ctx, config) {
             case "links_list": return { ok: true, links: listLinks(root, a.goal ?? null) };
             case "links_add": return { ok: true, ...addLink(root, { from: String(a.from ?? ""), to: String(a.to ?? ""), kind: a.kind, note: a.note ?? null }, autopilotActor(ex)) };
             case "links_remove": return { ok: true, ...removeLink(root, String(a.id ?? ""), autopilotActor(ex)) };
+            case "lane_model_set": {
+              const st0 = readAutopilotState(root);
+              const cur = { ...(st0.laneModels ?? {}) };
+              const lane = String(a.lane ?? "").trim();
+              if (!lane) return { ok: false, error: "missing lane" };
+              if (!a.text && !a.model) delete cur[lane];
+              else cur[lane] = { provider: a.text ? String(a.text).trim() : null, model: a.model ? String(a.model).trim() : null, reasoning_effort: a.reasoning_effort ? String(a.reasoning_effort).trim() : null };
+              const st1 = writeAutopilotState(root, { laneModels: cur }, { actor: autopilotActor(ex) });
+              return { ok: true, laneModels: st1.laneModels };
+            }
+            case "trash_stack": return { ok: true, ...stackTrashItems(root, { name: a.note ?? null, items: a.items ?? [] }, autopilotActor(ex)) };
+            case "trash_unstack": return { ok: true, ...unstackTrash(root, String(a.id ?? ""), autopilotActor(ex)) };
             case "catalog_list": return { ok: true, home: resolveUserHome(), skills: listSkills(), presets: listAgentPresets() };
             case "status": {
               const st = readAutopilotState(root);
@@ -5053,7 +5103,7 @@ export function apply(ctx, config) {
             const body = await readBody(req);
             const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
             const action = String(body.action ?? "list");
-            if (action === "list") return json(res, 200, { ok: true, ...listTrash(root) });
+            if (action === "list") return json(res, 200, { ok: true, ...listTrash(root), stacks: listStacks(root) });
             if (action === "restore-goal") {
               if (!body.goal) return json(res, 400, { error: "missing goal" });
               // version 缺省=原地恢复；传版本 slug/standalone=恢复并落到该泳道（拖拽落点）
@@ -5070,6 +5120,16 @@ export function apply(ctx, config) {
               if (!body.goal) return json(res, 400, { error: "missing goal" });
               const r = restoreGoalToDraft(root, String(body.goal), "human:gui");
               return json(res, 200, { ok: true, restored: r.id, to: "backlog", ...listTrash(root) });
+            }
+            // [v0.25] 堆叠：把多条回收站条目堆成一格 / 散开
+            if (action === "stack") {
+              const out = stackTrashItems(root, { name: body.name ?? null, items: body.items }, "human:gui");
+              return json(res, 200, { ok: true, stack: out.stack, ...listTrash(root), stacks: listStacks(root) });
+            }
+            if (action === "unstack") {
+              if (!body.id) return json(res, 400, { error: "missing id" });
+              unstackTrash(root, String(body.id), "human:gui");
+              return json(res, 200, { ok: true, ...listTrash(root), stacks: listStacks(root) });
             }
             // [v0.18] 彻底删除（不可恢复）：必须显式 confirm=true
             if (action === "purge-version" || action === "purge-goal") {
@@ -5195,6 +5255,8 @@ export function apply(ctx, config) {
                 managerUpdateGlobals: st.managerUpdateGlobals,
                 globalGoal: st.globalGoal,
                 globalPrompt: st.globalPrompt,
+                laneModels: st.laneModels ?? {},
+                reviewMode: st.reviewMode,
               });
             }
             // [v0.19] 泳道职责提示词（告知执行子代理这条泳道是干什么的）
@@ -5218,6 +5280,21 @@ export function apply(ctx, config) {
                 patch.managerIntervalMin = Math.min(24 * 60, Math.round(Number(body.managerIntervalMin)));
               }
               if (typeof body.managerUpdateGlobals === "boolean") patch.managerUpdateGlobals = body.managerUpdateGlobals;
+              // [v0.25] 按泳道选模型
+              if (body.laneModels && typeof body.laneModels === "object" && !Array.isArray(body.laneModels)) {
+                const clean = {};
+                for (const [k, v] of Object.entries(body.laneModels)) {
+                  if (!k || k.length > 80) continue;
+                  if (v === null) { clean[k] = null; continue; }
+                  if (!v || typeof v !== "object") continue;
+                  clean[k] = {
+                    provider: v.provider ? String(v.provider).slice(0, 80) : null,
+                    model: v.model ? String(v.model).slice(0, 120) : null,
+                    reasoning_effort: v.reasoning_effort ? String(v.reasoning_effort).slice(0, 24) : null,
+                  };
+                }
+                patch.laneModels = clean;
+              }
               // 评审模式也走这里（机审=auto 默认 / 人审=human）
               if (body.reviewMode === "auto" || body.reviewMode === "human") patch.reviewMode = body.reviewMode;
               const st = writeAutopilotState(root, patch, { actor: "human:gui" });
@@ -5244,6 +5321,25 @@ export function apply(ctx, config) {
         try {
           const st = readAutopilotState(r);
           const ws = dirname(r);
+          // [v0.26] 运行恢复（问题 9）：运行意图还在但内存里没有在跑的 runner（DSH 重启/被中断）→ 自动重新起跑，
+          // 从当前状态继续（plan 会按目标现有状态重算队列），不需人工再点一次 ▶。
+          try {
+            const intent = readRunnerIntent(r);
+            if (intent && !autopilotRunners.get(r)) {
+              try {
+                const resumed = autopilotStart(r, intent.version, intent.reviewMode, "system:autopilot");
+                appendEvent(r, { actor: "system:autopilot", event: "autopilot.lane_resumed", details: { version: intent.version, queue: (resumed?.queue ?? []).length } });
+              } catch (re) {
+                const msg = String(re?.message ?? re);
+                // 「已在执行中」属于**暂时性**阻塞（上一轮 attempt 的陈旧状态尚未收尾）→ 保留意图，下一轮继续尝试恢复；
+                // 只有硬错误（泳道不存在等）才清掉意图，避免每分钟刷日志。
+                if (!/已在执行中|等待当前 attempt 收尾/.test(msg)) {
+                  clearRunnerIntent(r);
+                }
+                appendEvent(r, { actor: "system:autopilot", event: "autopilot.lane_resume_pending", details: { version: intent.version, error: msg.slice(0, 200), transient: /已在执行中|等待当前 attempt 收尾/.test(msg) } });
+              }
+            }
+          } catch { /* 恢复检查失败下一轮再试 */ }
           // [v0.20] 阻塞自愈：存在 ⛔ 阻塞目标 → 自动唤起管理员去解决并推动（30 分钟冷却，独立于「启用实时管理」开关）
           try {
             const blocked = listBlockedGoals(r);

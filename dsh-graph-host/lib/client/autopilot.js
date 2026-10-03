@@ -173,6 +173,8 @@ function AutopilotPanel(props) {
   const [laneText, setLaneText] = React.useState("");
   const [lanePrompts, setLanePrompts] = React.useState({});
   const [laneOpen, setLaneOpen] = React.useState(false);
+  const [noHints, setNoHints] = React.useState(apNoHintsOn()); // [v0.25] 无提示模式
+  const [laneDraft, setLaneDraft] = React.useState({});        // [v0.25] 按泳道选模型的草稿
   const [mgrOpen, setMgrOpen] = React.useState(false);
   const [collab, setCollab] = React.useState({ messages: [], claims: [] });
   const [collabOpen, setCollabOpen] = React.useState(false);
@@ -412,6 +414,49 @@ function AutopilotPanel(props) {
     ),
     showArch && h("div", { style: { display: "flex", flexDirection: "column", gap: 2, padding: "2px 0 0 14px", opacity: 0.8 } },
       (st?.archived ?? []).map((g, i) => h("span", { key: i, style: chip }, `${g.id} ${g.title} · ${g.from}`)),
+    ),
+    // —— [v0.25] 高级：无提示模式 + 按泳道选模型 ——
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+      h("strong", { style: { flexShrink: 0 } }, "⚙ 高级"),
+      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
+        h("input", {
+          type: "checkbox", checked: noHints,
+          onChange: (e) => { setNoHints(e.target.checked); apApplyNoHints(e.target.checked); },
+        }),
+        "无提示模式（一键隐藏所有帮助说明）",
+      ),
+      h("span", { style: AP_ROW_CHIP }, "按泳道选模型"),
+      ...["*", "deploy-test", "interaction", "backend", "standalone", "backlog"].map((lane) => {
+        const cur = (mgr?.laneModels ?? {})[lane] ?? {};
+        const label = lane === "*" ? "默认" : (AP_GROUP_NAMES[lane] ?? lane);
+        return h("span", { key: "lm-" + lane, style: { display: "inline-flex", gap: 3, alignItems: "center" } },
+          h("span", { style: { fontSize: 11, opacity: 0.8 } }, label),
+          h("input", {
+            style: { ...input, width: 76, minWidth: 0 }, placeholder: "provider",
+            value: laneDraft[lane]?.provider ?? cur.provider ?? "",
+            onChange: (e) => setLaneDraft((p) => ({ ...p, [lane]: { ...(p[lane] ?? {}), provider: e.target.value, model: p[lane]?.model ?? cur.model ?? "" } })),
+          }),
+          h("input", {
+            style: { ...input, width: 96, minWidth: 0 }, placeholder: "model",
+            value: laneDraft[lane]?.model ?? cur.model ?? "",
+            onChange: (e) => setLaneDraft((p) => ({ ...p, [lane]: { ...(p[lane] ?? {}), model: e.target.value, provider: p[lane]?.provider ?? cur.provider ?? "" } })),
+          }),
+        );
+      }),
+      h("button", {
+        style: btnPrimary, disabled: !!busy,
+        title: "保存每条泳道的执行子代理模型（留空=沿用全局 executor 配置）",
+        onClick: () => {
+          const next = { ...(mgr?.laneModels ?? {}) };
+          for (const [lane, v] of Object.entries(laneDraft)) {
+            const provider = String(v?.provider ?? "").trim();
+            const model = String(v?.model ?? "").trim();
+            if (!provider && !model) delete next[lane];
+            else next[lane] = { provider: provider || null, model: model || null, reasoning_effort: v?.reasoning_effort ?? null };
+          }
+          mgrSet({ laneModels: next }).then((d) => { if (d?.ok) { setLaneDraft({}); setMsg("✅ 已保存泳道模型"); } });
+        },
+      }, "保存泳道模型"),
     ),
     // —— [v0.18] AI 推荐管理员（独立上行文；实时管理推荐 / 全局目标 / 全局提示词）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
@@ -719,6 +764,44 @@ function TemplateLane(props) {
 // ---------------------------------------------------------------------------
 // 回收站行（看板最底部）：已归档目标 + 已移除版本，均可一键恢复；可折叠 + 实时刷新
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// [v0.25] 无提示模式：一键隐藏所有帮助性说明（.dg-hint 段落）
+// ---------------------------------------------------------------------------
+const AP_NO_HINTS_KEY = "dsh-graph.no-hints";
+function apNoHintsOn() {
+  try { return localStorage.getItem(AP_NO_HINTS_KEY) === "1"; } catch { return false; }
+}
+function apApplyNoHints(on) {
+  try {
+    if (on) document.documentElement.setAttribute("data-dsh-no-hints", "1");
+    else document.documentElement.removeAttribute("data-dsh-no-hints");
+    localStorage.setItem(AP_NO_HINTS_KEY, on ? "1" : "0");
+  } catch { /* 无 localStorage 时忽略 */ }
+  const id = "dsh-graph-no-hints-style";
+  if (!document.getElementById(id)) {
+    const st = document.createElement("style");
+    st.id = id;
+    st.textContent = "html[data-dsh-no-hints] .dg-hint{display:none !important}";
+    document.head.appendChild(st);
+  }
+  window.dispatchEvent(new CustomEvent("dsh-graph.no-hints-changed", { detail: { on } }));
+}
+// 插件加载即生效（无需等看板打开）
+try { apApplyNoHints(apNoHintsOn()); } catch { /* 极早期环境忽略 */ }
+
+/** 统一渲染提示文案：无提示模式下自动不渲染 */
+function apHint(children, style) {
+  if (apNoHintsOn()) return null;
+  return h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, ...(style ?? {}) } }, children);
+}
+
+// ---------------------------------------------------------------------------
+// [v0.25] 回收站堆叠：把多条回收站条目手动堆成一格（省地方、便于管理），可散开
+// ---------------------------------------------------------------------------
+let apTrashDragKey = null;
+function apTrashDragStart(kind, key) { apTrashDragKey = { kind, key }; }
+function apTrashDragEnd() { apTrashDragKey = null; }
+
 function TrashLane(props) {
   const workspace = props?.workspace ?? null;
   const [data, setData] = React.useState({ goals: [], versions: [] });
@@ -753,7 +836,7 @@ function TrashLane(props) {
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
         if (!ok) { setMsg("❌ " + (d?.error ?? "彻底删除失败")); return; }
-        setData({ goals: d.goals ?? [], versions: d.versions ?? [] });
+        setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
         setMsg("🗑 已彻底删除（不可恢复）");
       })
       .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
@@ -769,7 +852,7 @@ function TrashLane(props) {
       body: JSON.stringify({ workspace, action: "list" }),
     })
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d?.ok) setData({ goals: d.goals ?? [], versions: d.versions ?? [] }); })
+      .then((d) => { if (d?.ok) setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] }); })
       .catch(() => {})
       .finally(() => setRefreshing(false));
   }, [workspace]);
@@ -797,7 +880,7 @@ function TrashLane(props) {
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
         if (!ok) { setMsg("❌ " + (d?.error ?? "恢复失败")); return; }
-        setData({ goals: d.goals ?? [], versions: d.versions ?? [] });
+        setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
         setMsg("✅ 已恢复：" + (d.restored ?? ""));
         // 让看板立即重绘（恢复的目标/版本要马上出现）
         window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { restored: d.restored } }));
@@ -836,19 +919,42 @@ function TrashLane(props) {
         data.goals.map((g) => h("div", {
           key: g.id,
           draggable: true,
-          title: "拖到任意泳道 = 恢复并落到该泳道",
+          title: "拖到泳道 = 恢复并落到该泳道；拖到另一条回收站条目上 = 堆成一格",
           onDragStart: (e) => {
             try { e.dataTransfer.setData("text/plain", "autopilot-trash:" + g.id); e.dataTransfer.effectAllowed = "copy"; } catch { /* 旧引擎 */ }
             apDragStart("trash", g.id);
+            apTrashDragStart("goal", g.id);
           },
-          onDragEnd: () => apDragEnd(),
+          onDragEnd: () => { apDragEnd(); apTrashDragEnd(); },
+          // [v0.25] 拖到另一条上 = 堆成一格（自动堆叠，省地方便于管理）
+          onDragOver: (e) => { if (apTrashDragKey && apTrashDragKey.key !== g.id) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = "copy"; } },
+          onDrop: (e) => {
+            if (!apTrashDragKey || apTrashDragKey.key === g.id) return;
+            e.preventDefault(); e.stopPropagation();
+            const src = apTrashDragKey;
+            apTrashDragKey = null;
+            setBusy("stack"); setMsg("");
+            fetch("/api/dsh-graph-autopilot/trash", {
+              method: "POST", credentials: "same-origin",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ workspace, action: "stack", name: g.title, items: [src, { kind: "goal", key: g.id }] }),
+            })
+              .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+              .then(({ ok, d }) => {
+                if (!ok) { setMsg("❌ " + (d?.error ?? "堆叠失败")); return; }
+                setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
+                setMsg("🧱 已堆成一格（点「散开」可拆）");
+              })
+              .catch((e2) => setMsg("❌ " + (e2?.message ?? "网络错误")))
+              .finally(() => setBusy(""));
+          },
           style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #6b7280", display: "flex", flexDirection: "column", gap: 4, fontSize: 12, cursor: "grab" },
         },
           h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
             h("b", null, g.title),
             h("span", { style: AP_ROW_CHIP }, g.id),
           ),
-          h("div", { style: { opacity: 0.6, fontSize: 11 } }, "来源：" + g.from),
+          h("div", { className: "dg-hint", style: { opacity: 0.6, fontSize: 11 } }, "来源：" + g.from),
           h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
             h("button", { style: AP_ROW_BTN, disabled: !!busy, onClick: () => restore({ action: "restore-goal", goal: g.id }) }, busy.indexOf(g.id) >= 0 ? "…" : "↩ 恢复目标"),
             // [v0.19] 一键回草稿
@@ -862,6 +968,44 @@ function TrashLane(props) {
               title: "彻底删除（不可恢复，需点两次确认）",
               onClick: () => purgeConfirm(`goal:${g.id}`, () => purge({ action: "purge-goal", goal: g.id, confirm: true })),
             }, purgePending === `goal:${g.id}` ? "确认彻底删除？" : "🗑 彻底删除"),
+          ),
+        )))),
+    // [v0.25] 堆叠：拖条目到另一条上即成一堆；用原生 details 展开（无需额外状态），可「散开」
+    (data.stacks ?? []).length > 0 && h("div", { key: "stacks", style: { display: "flex", flexDirection: "column", gap: 4 } },
+      h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7 } }, "堆叠（把一条拖到另一条上即可成堆；点标题展开，点「散开」拆开）"),
+      h("div", { style: { display: "flex", flexWrap: "wrap", gap: 8 } },
+        (data.stacks ?? []).map((s) => h("details", {
+          key: s.id,
+          style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "6px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #8a8f98", fontSize: 12, minWidth: 200 },
+        },
+          h("summary", { style: { cursor: "pointer", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
+            h("b", null, "🧱 " + s.name),
+            h("span", { style: AP_ROW_CHIP }, (s.items?.length ?? 0) + " 项"),
+          ),
+          h("div", { style: { display: "flex", flexDirection: "column", gap: 2, margin: "6px 0 2px 4px" } },
+            (s.items ?? []).map((it) => h("div", { key: it.kind + ":" + it.key, style: { fontSize: 11, opacity: 0.9 } },
+              `${it.kind === "version" ? "🏷️ " : ""}${it.key}`)),
+          ),
+          h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
+            h("button", {
+              style: AP_ROW_BTN, disabled: !!busy,
+              onClick: () => {
+                setBusy("unstack"); setMsg("");
+                fetch("/api/dsh-graph-autopilot/trash", {
+                  method: "POST", credentials: "same-origin",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ workspace, action: "unstack", id: s.id }),
+                })
+                  .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+                  .then(({ ok, d }) => {
+                    if (!ok) { setMsg("❌ " + (d?.error ?? "散开失败")); return; }
+                    setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
+                    setMsg("已散开该堆叠");
+                  })
+                  .catch((e2) => setMsg("❌ " + (e2?.message ?? "网络错误")))
+                  .finally(() => setBusy(""));
+              },
+            }, "散开"),
           ),
         )))),
     total === 0 && h("div", { key: "empty", style: { opacity: 0.6, fontSize: 12, padding: "6px 0" } }, "回收站是空的：被移除的版本泳道与已归档目标都会出现在这里，可随时恢复。"),
@@ -1087,6 +1231,25 @@ function LinksLayer(props) {
     paths.push({ ...l, d: `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`, color: AP_LINK_KINDS[l.kind].color });
   }
 
+  // [v0.26] 工具条：挂进看板头部工具行（.dg-head，与 刷新/标签筛选/记忆/项目知识库/已归档 同一行）
+  const toolbarEl = h("div", {
+    style: { display: "flex", gap: 6, alignItems: "center", padding: "2px 8px", borderRadius: 8, background: "rgba(20,22,27,.55)", border: "1px solid rgba(140,145,155,.4)", fontSize: 11, marginLeft: 8, flexShrink: 0 },
+  },
+    h("span", { style: { fontWeight: 700 } }, "🔗 连线"),
+    h("span", { style: AP_ROW_CHIP }, links.length + " 条"),
+    h("button", { style: mode === "link" ? AP_ROW_PRIMARY : AP_ROW_BTN, onClick: () => setMode(mode === "link" ? "idle" : "link") }, mode === "link" ? "✖ 退出连线" : "✏️ 连线"),
+    h("button", { style: mode === "erase" ? { ...AP_ROW_PRIMARY, background: "#c0392b", borderColor: "#c0392b" } : AP_ROW_BTN, onClick: () => setMode(mode === "erase" ? "idle" : "erase") }, mode === "erase" ? "✖ 退出擦除" : "🧽 橡皮擦"),
+    ...Object.entries(AP_LINK_KINDS).map(([k, v]) => h("span", { key: k, title: v.hint, style: { display: "inline-flex", gap: 4, alignItems: "center", opacity: 0.9 } },
+      h("span", { style: { width: 12, height: 3, borderRadius: 2, background: v.color, display: "inline-block" } }), v.label)),
+    mode === "link" ? h("span", { style: { opacity: 0.75 } }, "点卡片上部=开始／中部=协作／下部=结束") : null,
+    msg ? h("span", { style: { opacity: 0.9 } }, msg) : null,
+    h("button", { style: AP_ROW_BTN, onClick: () => load() }, "⟳ 刷新"),
+  );
+  const headEl = (typeof document !== "undefined") ? document.querySelector(".dg-head") : null;
+  const toolbarNode = (headEl && typeof ReactDOM !== "undefined" && ReactDOM && typeof ReactDOM.createPortal === "function")
+    ? ReactDOM.createPortal(toolbarEl, headEl)
+    : null;
+
   return h("div", {
     "data-ap-links-layer": "",
     style: { position: "fixed", inset: 0, zIndex: 6, pointerEvents: "none" },
@@ -1114,20 +1277,10 @@ function LinksLayer(props) {
       style: { position: "absolute", inset: 0, pointerEvents: mode === "erase" ? "none" : "auto", cursor: "crosshair" },
       onClick: onClickCard,
     }),
-    // 工具条：放在**最上面**（看板顶部工具行下方），与其它工具并列
-    h("div", {
-      style: { position: "absolute", left: 10, top: 58, pointerEvents: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "4px 8px", borderRadius: 8, background: "rgba(20,22,27,.88)", border: "1px solid rgba(140,145,155,.45)", fontSize: 11 },
-    },
-      h("span", { style: { fontWeight: 700 } }, "🔗 任务连线"),
-      h("span", { style: AP_ROW_CHIP }, links.length + " 条"),
-      h("button", { style: mode === "link" ? AP_ROW_PRIMARY : AP_ROW_BTN, onClick: () => setMode(mode === "link" ? "idle" : "link") }, mode === "link" ? "✖ 退出连线" : "✏️ 连线"),
-      h("button", { style: mode === "erase" ? { ...AP_ROW_PRIMARY, background: "#c0392b", borderColor: "#c0392b" } : AP_ROW_BTN, onClick: () => setMode(mode === "erase" ? "idle" : "erase") }, mode === "erase" ? "✖ 退出擦除" : "🧽 橡皮擦"),
-      ...Object.entries(AP_LINK_KINDS).map(([k, v]) => h("span", { key: k, title: v.hint, style: { display: "inline-flex", gap: 4, alignItems: "center", opacity: 0.9 } },
-        h("span", { style: { width: 12, height: 3, borderRadius: 2, background: v.color, display: "inline-block" } }), v.label)),
-      mode === "link" ? h("span", { style: { opacity: 0.75 } }, "点卡片上部=开始／中部=协作／下部=结束") : null,
-      msg ? h("span", { style: { opacity: 0.9 } }, msg) : null,
-      h("button", { style: AP_ROW_BTN, onClick: () => load() }, "⟳ 刷新"),
-    ),
+    // 工具条：**放进看板自身的头部工具行**（.dg-head，与 刷新/标签筛选/记忆/项目知识库/已归档 同一行），
+    // 用 ReactDOM.createPortal 挂进去；极早期（头部还没渲染）时退化为层内展示。
+    // 头部已存在 → portal 到工具行；否则退化为层内展示
+    headEl ? toolbarNode : toolbarEl,
   );
 }
 

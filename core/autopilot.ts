@@ -46,6 +46,8 @@ export interface AutopilotState {
   managerUpdateGlobals: boolean;
   /** [v0.20] 上次「阻塞自愈」唤起管理员的时间（ISO），用于冷却，避免反复拉起。 */
   blockerHandledAt?: string | null;
+  /** [v0.25] 按泳道选模型：key = 泳道键（版本 slug / standalone / backlog / "*" 通配），值 = 该泳道执行子代理用的模型路由。 */
+  laneModels?: Record<string, { provider?: string | null; model?: string | null; reasoning_effort?: string | null }>;
   /** [v0.19] 泳道职责提示词：key = 泳道键（版本 slug / standalone / backlog），值 = 该泳道是干什么的（派发时注入执行子代理）。 */
   lanePrompts: Record<string, string>;
 }
@@ -999,14 +1001,33 @@ export function checkClaimConflicts(
 // [v0.18] 完整扫描推荐 / AI 推荐管理员（上行文 + 结果落库）
 // ---------------------------------------------------------------------------
 export const DEFAULT_MANAGER_PROMPT = [
-  "你是看板「推荐线」的常驻管理员（AI），对该工作区负全责。",
+  "你是看板「推荐线」的常驻管理员（AI），对该工作区负全责，并**实时管理整个项目**。",
   "职责：",
   "1. 维护推荐清单：只保留真正值得做、彼此不重复、与全局目标一致的任务；合并重复项、淘汰已过时项。",
-  "2. 维护全局目标：若现状与用户目标漂移，给出更准确的全局目标表述。",
-  "3. 维护全局提示词：把用户反复强调的约束沉淀为全局提示词（供所有执行/推荐子 AI 遵循）。",
-  "4. 与已存在目标去重：已在看板上的任务不得重复推荐。",
+  "2. 维护全局目标与全局提示词：发现漂移就修正；把负责人反复强调的约束沉淀为全局提示词（供所有执行/推荐子 AI 遵循）。",
+  "3. **接受主对话的指令**：协作频道里 actor=human:gui 的消息就是负责人的指令，必须优先执行并在频道里回执（graph_collab_post）。",
+  "4. **自由编排任务**：你可以移动任务来管理——换泳道 / 改状态（graph_transition）/ 调整先后关系（连线 links_add、links_remove）/ 归档或移入回收站；每次移动都要在协作频道登记原因。",
+  "5. **处理所有阻塞与待选项**：blocked 目标必须分析原因并推动（补判据、补上下文卡片、改派或拆解），不允许长期滞留。",
+  "6. 与已在看板上的目标去重，已在做的不要重复推荐。",
   "输出要求：只输出一个 JSON 对象，字段：recommendations[]（每项 title/type/description/criteria[]/reason）、globalGoal（字符串或 null）、globalPrompt（字符串或 null）、notes（给用户看的简短说明）。",
+  "回写方式：调用 autopilot_manager_apply（推荐与全局）；要移动任务/连线/回收站/泳道提示词时用 graph_ap_control 的对应 action。",
 ].join("\n");
+
+/** [v0.25] 取某泳道的模型路由（回退到 "*" 通配；都没有则返回 null = 用全局 executor 配置）。 */
+export function laneModelFor(
+  root: string,
+  laneKey: string | null | undefined,
+): { provider?: string | null; model?: string | null; reasoning_effort?: string | null } | null {
+  const m = readAutopilotState(root).laneModels ?? {};
+  const key = String(laneKey ?? "").trim();
+  const hit = (key && m[key]) || m["*"];
+  if (!hit) return null;
+  const provider = hit.provider ? String(hit.provider) : undefined;
+  const model = hit.model ? String(hit.model) : undefined;
+  const effort = hit.reasoning_effort ? String(hit.reasoning_effort) : undefined;
+  if (!provider && !model && !effort) return null;
+  return { provider, model, reasoning_effort: effort };
+}
 
 /** 收集工作区客观信号（文件树 + 正式文件抽样 + git + 全局锚点），供深度扫描/管理员使用。 */
 export function collectWorkspaceDigest(root: string, workspace: string, opts?: { maxFiles?: number }): string {
@@ -1229,6 +1250,87 @@ export function listBlockedGoals(root: string): { id: string; title: string; rea
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// [v0.25] 回收站堆叠：把多条回收站条目手动堆成一格（省地方、便于管理），可散开
+// ---------------------------------------------------------------------------
+export const TRASH_STACKS_FILE = "autopilot-trash-stacks.json";
+/** 堆叠 id 的进程内自增序号（不引入随机数/加密强度需求） */
+let trashStackSeq = 0;
+
+export interface TrashStack {
+  id: string;
+  name: string;
+  items: { kind: "goal" | "version"; key: string }[];
+  created_at: string;
+  created_by: string;
+}
+
+function readStacks(root: string): TrashStack[] {
+  const f = join(root, TRASH_STACKS_FILE);
+  if (!existsSync(f)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(f, "utf8"));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((s: any) => s && Array.isArray(s.items) && s.items.length > 0)
+      .map((s: any) => ({
+        id: String(s.id ?? ""),
+        name: String(s.name ?? "堆叠"),
+        items: s.items
+          .filter((i: any) => i && (i.kind === "goal" || i.kind === "version") && i.key)
+          .map((i: any) => ({ kind: i.kind as "goal" | "version", key: String(i.key) })),
+        created_at: String(s.created_at ?? ""),
+        created_by: String(s.created_by ?? ""),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function writeStacks(root: string, list: TrashStack[]): void {
+  writeFileSync(join(root, TRASH_STACKS_FILE), JSON.stringify(list, null, 2) + "\n", "utf8");
+}
+
+export function listStacks(root: string): TrashStack[] {
+  return readStacks(root);
+}
+
+/** 把若干回收站条目堆成一格（同一条目只属于一个堆叠；重复会先从旧堆叠里摘掉）。 */
+export function stackTrashItems(
+  root: string,
+  input: { name?: string | null; items: { kind: "goal" | "version"; key: string }[] },
+  actor: string,
+): { ok: true; stack: TrashStack } {
+  const wanted = (Array.isArray(input.items) ? input.items : [])
+    .filter((i) => i && (i.kind === "goal" || i.kind === "version") && i.key)
+    .map((i) => ({ kind: i.kind, key: String(i.key) }));
+  if (wanted.length < 2) throw new GraphError("堆叠至少需要两条回收站条目");
+  const keys = new Set(wanted.map((i) => `${i.kind}:${i.key}`));
+  const list = readStacks(root)
+    .map((s) => ({ ...s, items: s.items.filter((i) => !keys.has(`${i.kind}:${i.key}`)) }))
+    .filter((s) => s.items.length > 0); // 被摘空的堆叠自动消失
+  const stack: TrashStack = {
+    id: `stk-${Date.now().toString(36)}-${(trashStackSeq = (trashStackSeq + 1) % 46656).toString(36)}`,
+    name: String(input.name ?? "").trim() || `堆叠 ${wanted.length} 项`,
+    items: wanted,
+    created_at: new Date().toISOString(),
+    created_by: actor,
+  };
+  list.push(stack);
+  writeStacks(root, list);
+  appendEvent(root, { actor, event: "autopilot.trash_stacked", details: { id: stack.id, count: stack.items.length } });
+  return { ok: true, stack };
+}
+
+export function unstackTrash(root: string, id: string, actor: string): { ok: true; id: string } {
+  const list = readStacks(root);
+  const next = list.filter((s) => s.id !== id);
+  if (next.length === list.length) throw new GraphError(`堆叠不存在：${id}`);
+  writeStacks(root, next);
+  appendEvent(root, { actor, event: "autopilot.trash_unstacked", details: { id } });
+  return { ok: true, id };
 }
 
 // ---------------------------------------------------------------------------
