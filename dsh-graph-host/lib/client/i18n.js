@@ -54,10 +54,11 @@
       'stage.blocked': '阻塞',
 
       // === 看板顶部/加载 ===
-      'board.title': '看板',
+      // [v0.19.2] 负责人要求：顶部/侧栏标签「看板」改名「任务台」
+      'board.title': '任务台',
       'board.tab': 'Kanban',
       // g-330：右侧栏页签入口（方案 B）——页签 chip 标题与侧栏 guide 条目文案
-      'sidebar.tab.title': '看板',
+      'sidebar.tab.title': '任务台',
       'sidebar.guide.description': '在这个会话里查看和操作目标看板',
       'kanban.loading': 'dsh-graph 看板加载中…',
       'kanban.error.workspace': '⚠️ 无法确定工作区，已暂停看板请求。',
