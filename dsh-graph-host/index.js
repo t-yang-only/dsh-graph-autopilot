@@ -193,6 +193,9 @@ import {
   lanePromptFor,
   restoreGoalToDraft,
   listBlockedGoals,
+  listRegistry,
+  setCriteriaChecked,
+  unmetCriteria,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -3808,6 +3811,23 @@ export function apply(ctx, config) {
     },
     // g-150: 设置/替换目标的最近指令
     {
+      // [v0.20] 判据打勾写回服务端（确认列自动裁决的判据来源；客户端勾选时同步）
+      path: "/api/dsh-graph/criteria-checked",
+      handler: async (req, res) => {
+        try {
+          if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+          const body = await readBody(req);
+          if (!body.goal) return json(res, 400, { error: "missing goal" });
+          const r = rootForReq(req, body);
+          const out = setCriteriaChecked(r, String(body.goal), body.checked ?? [], "human:gui");
+          json(res, 200, { ok: true, ...out });
+        } catch (e) {
+          json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) });
+        }
+      },
+    },
+    // g-150: 设置/替换目标的最近指令
+    {
       path: "/api/dsh-graph/set-directive",
       handler: async (req, res) => {
         try {
@@ -4449,8 +4469,22 @@ export function apply(ctx, config) {
       if (status === "review") {
         if (r.reviewMode === "auto") {
           try {
-            resolveAccept(root, id, { actor: "system:autopilot", verdict: "accept", force: true, reason: "autopilot 全自动评审（automation=ai + reviewMode:auto）" });
-            void autopilotAdvance(root, "auto-accepted");
+            // [v0.20] 判据门禁：未打勾的判据不为空 → **打回执行层继续改**（附未完成清单），不自动接受
+            const unmet = unmetCriteria(root, id);
+            if (unmet.length > 0) {
+              const reason = `判据未完成 ${unmet.length} 条：${unmet.slice(0, 3).join(" / ")}${unmet.length > 3 ? " …" : ""}`;
+              autopilotLog(`goal=${id} 自动裁决前判据门禁未通过 → 打回执行层（${reason}）`);
+              appendEvent(root, { actor: "system:autopilot", event: "autopilot.rework_requested", details: { goal: id, unmet } });
+              try {
+                transition(root, id, "in_progress", { actor: "system:autopilot", reason, force: true });
+              } catch (te) {
+                autopilotLog(`goal=${id} 打回失败（${String(te?.message ?? te)}）——保持 review 待人审`);
+              }
+              void autopilotAdvance(root, "criteria-unmet-rework");
+            } else {
+              resolveAccept(root, id, { actor: "system:autopilot", verdict: "accept", force: true, reason: "autopilot 全自动评审（automation=ai + reviewMode:auto；判据已全部打勾）" });
+              void autopilotAdvance(root, "auto-accepted");
+            }
           } catch (e) {
             autopilotFailCurrent(root, `自动裁决失败：${String(e?.message ?? e)}`);
             if (r.stopped) autopilotFinish(root, r, "stopped"); else void autopilotDispatchNext(root);
@@ -4497,12 +4531,26 @@ export function apply(ctx, config) {
         const lp = lanePromptFor(root, laneKey);
         if (lp) briefParts.push(`【本泳道职责（负责人设定，必须对齐）】\n${lp}`);
       } catch { /* 提示词缺失不阻断派发 */ }
+      // [v0.20] 记忆插件（dsh-memory-evolve）用全局 systemPrompt 上下文注入 + 全局工具注册，
+      // 子代理会话吃得到。这里显式提醒，避免执行子代理忽略系统提示里的记忆快照。
+      briefParts.push("【记忆】你的系统提示里若包含「记忆快照 / 长期记忆」段落，必须遵循其中的约束与偏好；若提供记忆类工具（de_* / memory_*），开工前先读取与本任务相关的条目。");
       // [v0.18] 协作频道：注入近期消息 + 其它任务的资源声明（防冲突）
       try {
         const digest = readCollab(root, 10);
         if (digest.length) {
           briefParts.push(`【协作频道（近期消息，可用 graph_collab_post/read 继续沟通）】\n${digest.map((c) => `- ${c.at} ${c.actor}${c.goal ? " @ " + c.goal : ""}: ${c.text || (c.claims ?? []).join("、")}`).join("\n")}`);
         }
+        // [v0.20] 工作区登记册（接口/需求变更）——防止接口改动不通知、实现与需求不匹配
+        try {
+          const reg = listRegistry(root);
+          const lines = [
+            ...reg.contracts.map((c) => `- [接口] ${c.text}（登记 ${c.at}）`),
+            ...reg.requirements.map((r) => `- [需求] ${r.text}（登记 ${r.at}）`),
+          ].slice(0, 10);
+          if (lines.length) {
+            briefParts.push(`【工作区登记册（接口/需求变更，必须对齐；改动接口须先 graph_collab_post kind=contract 登记）】\n${lines.join("\n")}`);
+          }
+        } catch { /* 登记册不可用不阻断派发 */ }
         const held = activeClaims(root).filter((c) => c.goal && c.goal !== nextId);
         if (held.length) {
           briefParts.push(`【当前被其它任务占用的资源（禁止改动，先协作）】\n${held.map((c) => `- ${c.goal}（${c.actor}）：${c.paths.join("、")}`).join("\n")}\n你若必须改动其中资源，先 graph_collab_post 说明并等待对方 release。改动前用 graph_collab_post 声明你要动的文件（claims），系统会拒绝与他人的冲突声明。`);
@@ -5045,7 +5093,11 @@ export function apply(ctx, config) {
             const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
             const action = String(body.action ?? "list");
             if (action === "list") {
-              return json(res, 200, { ok: true, messages: readCollab(root, Number(body.limit) || 50), claims: activeClaims(root) });
+              return json(res, 200, { ok: true, messages: readCollab(root, Number(body.limit) || 50), claims: activeClaims(root), registry: listRegistry(root) });
+            }
+            // [v0.20] 登记册：接口变更 / 需求变更（防接口改动不通知、需求与实现不匹配）
+            if (action === "registry") {
+              return json(res, 200, { ok: true, ...listRegistry(root), messages: readCollab(root, 20), claims: activeClaims(root) });
             }
             if (action === "post") {
               // 冲突闸门：声明与其它活跃任务重叠时**拒绝**（要求先协作），防并发改同一批文件

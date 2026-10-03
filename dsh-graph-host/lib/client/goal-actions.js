@@ -20,6 +20,35 @@
         setChecked(next);
         try { localStorage.setItem(storeKey, JSON.stringify(next)); } catch {}
         window.dispatchEvent(new Event("dsh-graph.criteria-changed"));
+        // [v0.20] 判据打勾同步到服务端：自动裁决（打回/接受）以服务端记录为准
+        try {
+          fetch("/api/dsh-graph/criteria-checked", {
+            method: "POST", credentials: "same-origin",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ goal: props.goalId, checked: next }),
+          }).catch(() => {});
+        } catch { /* 同步失败不影响勾选 */ }
+        // [v0.20] 确认列自动裁决（负责人要求）：
+        //   ① 全部判据打勾 + 目标处于 review → 自动接受，直接进入交付；
+        //   ② 未全部完成 → 就地写明「未完成原因」（缺哪几条）；
+        //   ③ 该目标若正处于自动驾驶行内（reviewMode=auto 的自动运行），缺判据由宿主侧打回执行层继续改。
+        try {
+          const inReview = String(props.status ?? "") === "review";
+          const all = items.every((t) => next.includes(t));
+          if (inReview && all) {
+            fetch("/api/dsh-graph/accept", {
+              method: "POST", credentials: "same-origin",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ goal: props.goalId }),
+            })
+              .then((r) => r.json().then((x) => ({ ok: r.ok, x })))
+              .then(({ ok, x }) => setFbNote(ok && x?.ok ? "✅ 判据全部满足，已自动接受并进入交付" : ("⚠️ 自动接受未成功：" + (x?.error ?? "未知错误"))))
+              .catch(() => setFbNote("⚠️ 自动接受网络失败（可手动批量接受）"));
+          } else if (inReview && !all) {
+            const missing = items.filter((t) => !next.includes(t));
+            setFbNote("⏳ 未完成 " + missing.length + " 条判据：" + missing.slice(0, 2).join(" / ") + (missing.length > 2 ? " …" : ""));
+          }
+        } catch { /* 自动裁决异常不影响勾选本身 */ }
       };
       const sendFb = async (criterion) => {
         const t = fbText.trim();

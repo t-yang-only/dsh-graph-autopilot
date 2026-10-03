@@ -995,7 +995,7 @@
           // g-170：「✏️ 判据」编辑入口放在小节标题处（负责人 2026-08-25 指示），点击打开判据编辑弹窗
           crit != null ? sectionBlock("c", dgT("section.criteria"), crit,
             !isPlaceholder(crit) && ["ready", "in_progress", "review", "delivered"].includes(status)
-              ? h(CriteriaChecklist, { goalId: props.id, crit, att, onClose: props.onClose })
+              ? h(CriteriaChecklist, { goalId: props.id, crit, att, status: (d && d.status) ?? props.status ?? null, onClose: props.onClose })
               : null, true,
             h("button", {
               style: { ...S.btnPrimary, fontSize: 11, padding: "1px 6px", marginLeft: 6, verticalAlign: "middle", opacity: 1 },

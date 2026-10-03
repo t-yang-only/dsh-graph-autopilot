@@ -890,7 +890,25 @@ export interface CollabEntry {
   goal: string | null;
   text: string;
   claims?: string[];
-  kind: "note" | "claim" | "release";
+  /** note=普通消息；claim/release=资源占用声明；contract=接口登记；requirement=需求登记 */
+  kind: "note" | "claim" | "release" | "contract" | "requirement";
+}
+
+/**
+ * [v0.20] 协作登记册：按工作区（root 即工作区）聚合「接口变更」与「需求变更」两类登记，
+ * 用于防止接口改动不通知、需求与实现不匹配。派发任务时会注入给执行子代理。
+ */
+export function listRegistry(root: string, windowMin = 24 * 60): { contracts: CollabEntry[]; requirements: CollabEntry[] } {
+  const cutoff = Date.now() - windowMin * 60_000;
+  const contracts: CollabEntry[] = [];
+  const requirements: CollabEntry[] = [];
+  for (const e of readCollab(root, 500)) {
+    const t = Date.parse(e.at ?? "");
+    if (!Number.isFinite(t) || t < cutoff) continue;
+    if (e.kind === "contract") contracts.push(e);
+    else if (e.kind === "requirement") requirements.push(e);
+  }
+  return { contracts, requirements };
 }
 
 export function postCollab(
@@ -1211,6 +1229,46 @@ export function listBlockedGoals(root: string): { id: string; title: string; rea
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// [v0.20] 判据打勾的服务端持久化（确认列自动裁决的判据来源：客户端勾选 → 写回 meta）
+// ---------------------------------------------------------------------------
+export function setCriteriaChecked(
+  root: string,
+  id: string,
+  checked: string[],
+  actor: string,
+): { ok: true; checked: string[] } {
+  const file = findGoalFile(root, id);
+  const doc = loadGoal(file);
+  const list = Array.isArray(checked) ? checked.map((c) => String(c).trim()).filter(Boolean).slice(0, 100) : [];
+  doc.meta.criteria_checked = list;
+  saveGoal(file, doc);
+  appendEvent(root, { actor, event: "autopilot.criteria_checked", details: { goal: id, count: list.length } });
+  return { ok: true, checked: list };
+}
+
+/** 取目标的判据条目（与客户端 criteriaItems 同源：去 HTML 注释 → 按行 trim）。 */
+export function criteriaItemsOf(root: string, id: string): string[] {
+  try {
+    const doc = loadGoal(findGoalFile(root, id));
+    const raw = sectionText(doc.body, "质量判据") ?? "";
+    return String(raw).replace(/<!--[\s\S]*?-->/g, "").split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** 未打勾的判据（自动裁决用：为空 = 判据全部满足）。 */
+export function unmetCriteria(root: string, id: string): string[] {
+  const items = criteriaItemsOf(root, id);
+  if (!items.length) return [];
+  let checked: string[] = [];
+  try {
+    checked = (loadGoal(findGoalFile(root, id)).meta.criteria_checked as string[]) ?? [];
+  } catch { /* 读不到视为全未勾 */ }
+  return items.filter((t) => !checked.includes(t));
 }
 
 // ---------------------------------------------------------------------------
