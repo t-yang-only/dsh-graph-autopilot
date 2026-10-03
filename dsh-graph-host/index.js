@@ -200,6 +200,9 @@ import {
   addLink,
   removeLink,
   linkGates,
+  ensureGroups,
+  listGroups,
+  isDefaultGroup,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -2893,6 +2896,8 @@ export function apply(ctx, config) {
           const includeArchived = sp.get("includeArchived") === "1" || sp.get("includeArchived") === "true";
           const lazy = sp.get("lazy") === "1" || sp.get("lazy") === "true";
           const meta = rootForReqMeta(_req);
+          // [v0.23] 常驻分组自愈：任何工作区第一次打开看板时保证 交互/部署测试/后端 三个分组存在（只补缺，不覆盖）
+          try { ensureGroups(meta.root); } catch { /* 自愈失败不影响看板数据 */ }
           const cached = getCachedBoardPayload(meta.root, { includeArchived, lazy });
           const payload = { ...cached.payload };
           payload._diagnostics = {

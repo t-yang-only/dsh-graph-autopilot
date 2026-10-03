@@ -1332,6 +1332,70 @@ export function linkGates(root: string, goal: string): { blockedBy: GoalLink[]; 
 }
 
 // ---------------------------------------------------------------------------
+// [v0.23] 常驻分组：交互 / 部署测试 / 后端
+//   —— 与「独立目标」同属性：**每个工作区都有、不可删除**；不再是「版本泳道」语义
+//      （没有发布/恢复为活跃这些版本动作），但每个分组可单独设职责提示词。
+//   数据仍落在 versions/<slug>/（旧数据原地兼容，不搬家），靠 groups 定义 + 保护名单区分。
+// ---------------------------------------------------------------------------
+export const DEFAULT_GROUPS: { slug: string; name: string; prompt: string }[] = [
+  { slug: "interaction", name: "交互", prompt: "交互分组：负责界面与交互逻辑（页面、组件、用户操作路径、空态/加载态/错误态）。" },
+  { slug: "deploy-test", name: "部署测试", prompt: "部署测试分组：负责构建产物发布到测试环境、冒烟验证、版本号记录与回滚方案。" },
+  { slug: "backend", name: "后端", prompt: "后端分组：负责服务端接口与数据层（参数校验、错误码、必要日志、接口兼容性说明）。" },
+];
+
+export const DEFAULT_GROUP_SLUGS: string[] = DEFAULT_GROUPS.map((g) => g.slug);
+
+export function isDefaultGroup(slug: unknown): boolean {
+  return DEFAULT_GROUP_SLUGS.includes(String(slug ?? "").trim());
+}
+
+export function listGroups(root: string): { slug: string; name: string; prompt: string | null }[] {
+  const prompts = readAutopilotState(root).lanePrompts ?? {};
+  return DEFAULT_GROUPS.map((g) => ({ slug: g.slug, name: g.name, prompt: prompts[g.slug] ?? null }));
+}
+
+/**
+ * 自愈创建：保证本工作区一定存在这三个常驻分组（缺目录/version.md 就补建；缺职责提示词就补默认）。
+ * 只补缺，绝不覆盖已有内容。返回本次实际创建/补种的 slug。
+ */
+export function ensureGroups(root: string, actor = "system:autopilot"): { created: string[]; promptsSeeded: string[] } {
+  const created: string[] = [];
+  const promptsSeeded: string[] = [];
+  for (const g of DEFAULT_GROUPS) {
+    const dir = join(root, "versions", g.slug);
+    const vfile = join(dir, "version.md");
+    if (!existsSync(vfile)) {
+      mkdirSync(join(dir, "goals"), { recursive: true });
+      const doc = {
+        id: `v-grp-${g.slug}`,
+        name: g.name,
+        status: "active",
+        created_at: new Date().toISOString(),
+        created_by: actor,
+        group: true,
+      };
+      writeFileSync(
+        vfile,
+        `---\n${JSON.stringify(doc, null, 2)}\n---\n\n## 范围\n\n（常驻分组：与独立目标同属性，每个工作区都有、不可删除）\n`,
+        "utf8",
+      );
+      created.push(g.slug);
+      appendEvent(root, { actor, event: "autopilot.group_created", details: { slug: g.slug, name: g.name } });
+    } else {
+      mkdirSync(join(dir, "goals"), { recursive: true });
+    }
+    const st = readAutopilotState(root);
+    const prompts = { ...(st.lanePrompts ?? {}) };
+    if (!prompts[g.slug] || !String(prompts[g.slug]).trim()) {
+      prompts[g.slug] = g.prompt;
+      writeAutopilotState(root, { lanePrompts: prompts }, { actor });
+      promptsSeeded.push(g.slug);
+    }
+  }
+  return { created, promptsSeeded };
+}
+
+// ---------------------------------------------------------------------------
 // [v0.20] 判据打勾的服务端持久化（确认列自动裁决的判据来源：客户端勾选 → 写回 meta）
 // ---------------------------------------------------------------------------
 export function setCriteriaChecked(

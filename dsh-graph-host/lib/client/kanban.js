@@ -3156,9 +3156,11 @@
                 h("span", { style: S.close, onClick: () => { setVersionDetailTarget(null); setVersionDetailData(null); } }, "✕"),
                 // g-177: 重命名按钮移到版本标题右边（跟 goal 卡片交互一致：标题行内小 ✏️）
                 h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 12, flexWrap: "wrap" } },
-                  h("span", { style: { fontWeight: 700, fontSize: 15 } }, dgT("versionDetail.title") + "：" + versionDetailTarget.name),
+                  h("span", { style: { fontWeight: 700, fontSize: 15 } }, isDefaultGroup(versionDetailTarget.slug)
+                    ? "📁 分组：" + versionDetailTarget.name + "（常驻分组 · 与独立目标同属性）"
+                    : dgT("versionDetail.title") + "：" + versionDetailTarget.name),
                   h("button", {
-                    style: { ...S.btn, fontSize: 11, padding: "1px 6px", opacity: 0.7 }, className: "dg-btn",
+                    style: { ...S.btn, fontSize: 11, padding: "1px 6px", opacity: 0.7, display: isDefaultGroup(versionDetailTarget.slug) ? "none" : undefined }, className: "dg-btn",
                     title: dgT("version.renameTitle"),
                     onClick: () => {
                       setRenameVersionTarget({ slug: versionDetailTarget.slug, name: versionDetailTarget.name });
@@ -3172,16 +3174,23 @@
                 ),
                 // 基本信息
                 h("div", { style: { marginBottom: 12, fontSize: 13, opacity: 0.8 } },
-                  h("div", null, `Slug：${versionDetailTarget.slug}`),
-                  h("div", null, dgT("versionDetail.status") + (versionDetailTarget.status === "released" ? "🟢 released" : versionDetailTarget.status === "active" ? "🔵 " + dgT("versionDrawer.active") : `⚪ ${versionDetailTarget.status}`)),
+                  isDefaultGroup(versionDetailTarget.slug) ? null : h("div", null, `Slug：${versionDetailTarget.slug}`),
+                  // [v0.23] 常驻分组不显示版本状态（它们没有版本语义）
+                  isDefaultGroup(versionDetailTarget.slug)
+                    ? h("div", null, "🔒 " + dgT("version.protectedNote"))
+                    : h("div", null, dgT("versionDetail.status") + (versionDetailTarget.status === "released" ? "🟢 released" : versionDetailTarget.status === "active" ? "🔵 " + dgT("versionDrawer.active") : `⚪ ${versionDetailTarget.status}`)),
                   h("div", null, dgT("versionDetail.goals") + versionDetailTarget.goals_count),
                 ),
                 // g-135: 版本摘要/范围（从 version.md 的「范围」小节读取）
                 h("div", { style: { marginBottom: 12 } },
-                  h("div", { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } }, dgT("versionDetail.summary")),
-                  // [v0.20] 每条泳道在自己的详情弹窗里编辑「职责提示词」（派发时注入执行子代理）
+                  h("div", { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } }, isDefaultGroup(versionDetailTarget.slug) ? "📁 常驻分组" : dgT("versionDetail.summary")),
+                  // [v0.20] 每条泳道在自己的详情弹窗里编辑「职责提示词」
                   h(LanePromptEditor, { workspace: activeWs, lane: versionDetailTarget.slug }),
-                  versionDetailLoading
+                  // [v0.23] 常驻分组：不显示版本摘要，改为分组说明
+                  isDefaultGroup(versionDetailTarget.slug)
+                    ? h("div", { style: { fontSize: 12, opacity: 0.8, padding: "6px 8px", borderRadius: 4, background: "rgba(128,128,128,.08)", lineHeight: 1.5 } },
+                        "每个工作区都有的常驻分组；与「独立目标」同属性，不可删除、不参与版本发布/归档。上面可设置它的职责提示词 —— 派发本分组任务时会注入执行子 AI，让它知道这条线是干什么的。")
+                    : versionDetailLoading
                     ? h("div", { style: { fontSize: 12, opacity: 0.5 } }, dgT("common.loading"))
                     : (versionDetailData?.summary || versionDetailData?.scope)
                       ? h("div", { style: { fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.5, padding: "6px 8px", borderRadius: 4, background: "rgba(128,128,128,.08)" } },
@@ -3267,8 +3276,8 @@
                         },
                       }, dgT("versionDetail.reactivate"))
                     : null,
-                  // 标记为 released —— 仅非 released 时显示
-                  versionDetailTarget.status !== "released"
+                  // 标记为 released —— 仅非 released 且非常驻分组时显示（分组没有发布语义）
+                  versionDetailTarget.status !== "released" && !isDefaultGroup(versionDetailTarget.slug)
                     ? h("button", {
                         style: { ...S.btn, padding: "6px 16px", fontSize: 13, color: "var(--dsw-alias-label-primary, #4caf50)", background: "rgba(76,175,80,.12)", border: "1px solid rgba(76,175,80,.4)" },
                         className: "dg-btn",

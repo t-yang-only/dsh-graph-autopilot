@@ -480,6 +480,10 @@ const AP_ROW_PRIMARY = { ...AP_ROW_BTN, background: "#3b7ddd", borderColor: "#3b
 // 固定分组（与「独立目标」同属性：不可删除）——须与 core/autopilot.ts 的 PROTECTED_VERSION_SLUGS 保持一致
 const AP_PROTECTED_VERSION_SLUGS = ["interaction", "deploy-test", "backend"];
 function isApProtectedVersion(slug) { return AP_PROTECTED_VERSION_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
+// [v0.23] 常驻分组（与 core 的 DEFAULT_GROUPS 保持一致）：与独立目标同属性，无版本语义
+const AP_DEFAULT_GROUP_SLUGS = ["interaction", "deploy-test", "backend"];
+const AP_GROUP_NAMES = { interaction: "交互", "deploy-test": "部署测试", backend: "后端" };
+function isDefaultGroup(slug) { return AP_DEFAULT_GROUP_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
 
 function apLaneShell(opts) {
   const { key, title, count, collapsed, onToggle, onRefresh, refreshing, fullWidth, actions, hint, children, dropProps } = opts;
