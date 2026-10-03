@@ -15,9 +15,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { appendEvent, readEvents } from "./events.ts";
-import { createGoal, findGoalFile, loadGoal, saveGoal, setCriteria, moveGoal, unarchiveGoal, normalizeGoalType, GraphError } from "./ops.ts";
+import { createGoal, findGoalFile, loadGoal, saveGoal, setCriteria, moveGoal, unarchiveGoal, normalizeGoalType, readGoalBinding, GraphError } from "./ops.ts";
 
 export const AUTOPILOT_STATE_FILE = "autopilot.json";
 export const RECOMMENDATIONS_FILE = "autopilot-recommendations.json";
@@ -390,7 +390,14 @@ export interface LaneGoalReadiness {
   blockers: string[];
 }
 
-export function laneReadiness(root: string, version: string): {
+export function laneReadiness(root: string, version: string, opts?: {
+  /**
+   * [v0.27] 问题 9 收尾：子代理存活探测。对「当前 attempt 的 child id」返回 false 表示**已死**
+   * （典型场景：DSH 重启后内存 registry 里不再有该 child），此时不再以「已在执行中」阻断派发。
+   * 未提供回调、拿不到 child id 或回调返回 true/未知时，一律保守按「仍在执行」处理。
+   */
+  isLive?: (childId: string) => boolean;
+}): {
   version: string;
   goals: LaneGoalReadiness[];
   runnable: string[];
@@ -405,7 +412,18 @@ export function laneReadiness(root: string, version: string): {
     const doc = loadGoal(file);
     if (doc.meta.archived) continue;
     const blockers: string[] = [];
-    if (doc.meta.status === "in_progress") blockers.push("已在执行中（等待当前 attempt 收尾）");
+    if (doc.meta.status === "in_progress") {
+      // [v0.27] 问题 9：attempt 子代理已死（如 DSH 重启后 live registry 无此 child）时不阻断派发，
+      // 让自动恢复能重新执行该目标；拿不到 child id（无绑定/绑定已清）时保守沿用旧阻断。
+      let childGone = false;
+      if (opts?.isLive) {
+        try {
+          const binding = readGoalBinding(root, id);
+          if (binding?.child_id) childGone = opts.isLive(binding.child_id) === false;
+        } catch { /* 绑定读取失败：保守按仍在执行处理 */ }
+      }
+      if (!childGone) blockers.push("已在执行中（等待当前 attempt 收尾）");
+    }
     if (doc.meta.status === "blocked") blockers.push(`目标阻塞：${doc.meta.blocked_reason || "未提供原因"}`);
     if (doc.meta.status === "delivered") blockers.push("已交付");
     if (doc.meta.status === "draft") blockers.push("仍是草稿（backlog 目标不可派发）");
@@ -504,7 +522,13 @@ export function listArchived(root: string): { id: string; title: string; from: s
   const backlogArch = join(root, "backlog", "archived");
   if (existsSync(backlogArch)) {
     for (const name of readdirSync(backlogArch)) {
+      // [v0.27] 问题 22：backlog 归档同时接受平铺 backlog/archived/<id>.md 与
+      // 目录形态 backlog/archived/<id>/goal.md（带附件目标移回草稿后归档的落点）。
       if (name.endsWith(".md")) pushDoc(join(backlogArch, name), `backlog/archived/${name}`);
+      else {
+        const nested = join(backlogArch, name, "goal.md");
+        if (existsSync(nested)) pushDoc(nested, `backlog/archived/${name}`);
+      }
     }
   }
   return out;
@@ -650,8 +674,18 @@ export const TRASH_DIR = "_removed";
  */
 export const PROTECTED_VERSION_SLUGS: string[] = ["interaction", "deploy-test", "backend"];
 
-export function isProtectedVersion(slug: unknown): boolean {
-  return PROTECTED_VERSION_SLUGS.includes(String(slug ?? "").trim());
+export function isProtectedVersion(slug: unknown, opts?: { root?: string | null; homeDir?: string | null }): boolean {
+  const s = String(slug ?? "").trim();
+  if (!s) return false;
+  if (PROTECTED_VERSION_SLUGS.includes(s)) return true;
+  // [v0.27] 问题 13：自建分组（workspace 定义 + 全局定义）与内置三条同属性 → 同样不可删除。
+  // 兼容旧调用：只传 slug（无 root/home 上下文）时退化为「只认内置三条」。
+  const root = String(opts?.root ?? "").trim();
+  if (root) {
+    try { if (readWorkspaceGroups(root).some((g) => g.slug === s)) return true; } catch { /* 读取失败按不保护处理 */ }
+  }
+  try { if (readGlobalGroupDefs(opts?.homeDir).some((g) => g.slug === s)) return true; } catch { /* 同上 */ }
+  return false;
 }
 
 export interface RemovedVersion {
@@ -753,7 +787,8 @@ export function purgeArchivedGoal(root: string, id: string, actor: string): { ok
   const hit = listArchived(root).find((g) => g.id === gid);
   if (!hit) throw new GraphError(`回收站中不存在已归档目标：${gid}`);
   const parts = String(hit.from).replace(/\\/g, "/").split("/");
-  // from 形如 versions/<v>/archived/<id> | goals/archived/<id> | backlog/archived/<file>.md
+  // from 形如 versions/<v>/archived/<id> | goals/archived/<id> | backlog/archived/<file>.md | backlog/archived/<id>（[v0.27] 目录形态）
+  // — 最后一节既可能是文件也可能是目录，rmSync(recursive) 两种都覆盖。
   let target: string | null = null;
   if (parts[0] === "versions" && parts[2] === "archived") target = join(root, "versions", parts[1], "archived", parts[3]);
   else if (parts[0] === "goals" && parts[1] === "archived") target = join(root, "goals", "archived", parts[2]);
@@ -1113,8 +1148,13 @@ function scanExistingTitles(root: string): string[] {
   const bd = join(root, "backlog");
   if (existsSync(bd)) {
     for (const n of readdirSync(bd)) {
-      if (!n.endsWith(".md")) continue;
-      push(join(bd, n), "草稿");
+      if (n === "archived") continue;
+      // [v0.27] 问题 22：同时接受平铺 backlog/<id>.md 与目录形态 backlog/<id>/goal.md。
+      if (n.endsWith(".md")) push(join(bd, n), "草稿");
+      else {
+        const nested = join(bd, n, "goal.md");
+        if (existsSync(nested)) push(nested, "草稿");
+      }
     }
   }
   return out;
@@ -1438,6 +1478,8 @@ export function linkGates(root: string, goal: string): { blockedBy: GoalLink[]; 
 //   —— 与「独立目标」同属性：**每个工作区都有、不可删除**；不再是「版本泳道」语义
 //      （没有发布/恢复为活跃这些版本动作），但每个分组可单独设职责提示词。
 //   数据仍落在 versions/<slug>/（旧数据原地兼容，不搬家），靠 groups 定义 + 保护名单区分。
+// [v0.27] 问题 13：分组可自建 —— 定义存 <root>/autopilot-groups.json（workspace 级）与
+//   <home>/.dsh/group-defs.json（global 级）；两者都会被 ensureGroups 物化为本工作区的 versions/<slug>/。
 // ---------------------------------------------------------------------------
 export const DEFAULT_GROUPS: { slug: string; name: string; prompt: string }[] = [
   { slug: "interaction", name: "交互", prompt: "交互分组：负责界面与交互逻辑（页面、组件、用户操作路径、空态/加载态/错误态）。" },
@@ -1451,48 +1493,221 @@ export function isDefaultGroup(slug: unknown): boolean {
   return DEFAULT_GROUP_SLUGS.includes(String(slug ?? "").trim());
 }
 
-export function listGroups(root: string): { slug: string; name: string; prompt: string | null }[] {
+// —— [v0.27] 问题 13：自建分组定义（workspace / global 两级） ——
+export const GROUPS_FILE = "autopilot-groups.json";
+export const GROUP_DEFS_FILENAME = "group-defs.json";
+
+export interface GroupDefinition {
+  slug: string;
+  name: string;
+  scope: "workspace" | "global";
+  prompt: string | null;
+  created_at: string;
+  created_by: string;
+}
+
+function normalizeGroupDef(raw: any, fallbackScope: "workspace" | "global"): GroupDefinition | null {
+  if (!raw || typeof raw !== "object") return null;
+  const slug = String(raw.slug ?? "").trim();
+  const name = String(raw.name ?? "").trim();
+  if (!slug || !name) return null;
+  const scope: "workspace" | "global" = raw.scope === "global" || raw.scope === "workspace" ? raw.scope : fallbackScope;
+  return {
+    slug,
+    name,
+    scope,
+    prompt: raw.prompt == null ? null : (String(raw.prompt).trim() || null),
+    created_at: String(raw.created_at ?? ""),
+    created_by: String(raw.created_by ?? ""),
+  };
+}
+
+function readGroupDefsFile(file: string, fallbackScope: "workspace" | "global"): GroupDefinition[] {
+  if (!existsSync(file)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    if (!Array.isArray(raw)) return [];
+    return raw.map((r: any) => normalizeGroupDef(r, fallbackScope)).filter((g: GroupDefinition | null): g is GroupDefinition => !!g);
+  } catch {
+    return []; // 坏文件按「无自建分组」处理（与其它 JSON 读取同口径：不猜）
+  }
+}
+
+/** workspace 级自建分组（<root>/autopilot-groups.json）。 */
+export function readWorkspaceGroups(root: string): GroupDefinition[] {
+  return readGroupDefsFile(join(root, GROUPS_FILE), "workspace");
+}
+
+function writeWorkspaceGroups(root: string, list: GroupDefinition[]): void {
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, GROUPS_FILE), JSON.stringify(list, null, 2) + "\n", "utf8");
+}
+
+/** global 级分组定义文件路径（<home>/.dsh/group-defs.json）；home 解析不到时返回 null。 */
+export function groupDefsFile(homeDir?: string | null): string | null {
+  const home = resolveUserHome(homeDir);
+  return home ? join(home, ".dsh", GROUP_DEFS_FILENAME) : null;
+}
+
+/** global 级自建分组（跨工作区共享；home 解析不到时为空表）。 */
+export function readGlobalGroupDefs(homeDir?: string | null): GroupDefinition[] {
+  const f = groupDefsFile(homeDir);
+  return f ? readGroupDefsFile(f, "global") : [];
+}
+
+function writeGlobalGroupDefs(list: GroupDefinition[], homeDir?: string | null): void {
+  const f = groupDefsFile(homeDir);
+  if (!f) throw new GraphError("无法解析用户主目录（USERPROFILE/HOME 均不可用），不能写全局分组定义");
+  mkdirSync(dirname(f), { recursive: true });
+  writeFileSync(f, JSON.stringify(list, null, 2) + "\n", "utf8");
+}
+
+/** 分组名 → slug：保留中文/字母/数字，其它字符转 "-"，折叠重复并去首尾 "-"。 */
+export function slugifyGroupName(name: string): string {
+  const s = String(name ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/g, "");
+  // Windows 保留设备名兜底（slug 会当目录名用）
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(s)) return `${s}-grp`;
+  return s;
+}
+
+/** 合并清单：内置三条 + 自建（workspace 定义 + 全局定义），slug 去重、内置优先。 */
+export function listGroups(root: string): { slug: string; name: string; prompt: string | null; scope: string; builtin: boolean }[] {
   const prompts = readAutopilotState(root).lanePrompts ?? {};
-  return DEFAULT_GROUPS.map((g) => ({ slug: g.slug, name: g.name, prompt: prompts[g.slug] ?? null }));
+  const out: { slug: string; name: string; prompt: string | null; scope: string; builtin: boolean }[] = DEFAULT_GROUPS.map((g) => ({
+    slug: g.slug,
+    name: g.name,
+    prompt: prompts[g.slug] ?? null,
+    scope: "builtin",
+    builtin: true,
+  }));
+  const seen = new Set(out.map((g) => g.slug));
+  for (const g of [...readWorkspaceGroups(root), ...readGlobalGroupDefs()]) {
+    if (seen.has(g.slug)) continue;
+    seen.add(g.slug);
+    out.push({ slug: g.slug, name: g.name, prompt: (prompts[g.slug] ?? g.prompt) || null, scope: g.scope, builtin: false });
+  }
+  return out;
+}
+
+/** 物化单个分组到本工作区：versions/<slug>/version.md（缺则补）+ goals 目录 + 职责提示词补种（只补缺）。 */
+function materializeGroup(
+  root: string,
+  def: { slug: string; name: string; prompt: string | null },
+  actor: string,
+  created: string[],
+  promptsSeeded: string[],
+): void {
+  const dir = join(root, "versions", def.slug);
+  const vfile = join(dir, "version.md");
+  if (!existsSync(vfile)) {
+    mkdirSync(join(dir, "goals"), { recursive: true });
+    const doc = {
+      id: `v-grp-${def.slug}`,
+      name: def.name,
+      status: "active",
+      created_at: new Date().toISOString(),
+      created_by: actor,
+      group: true,
+    };
+    writeFileSync(
+      vfile,
+      `---\n${JSON.stringify(doc, null, 2)}\n---\n\n## 范围\n\n（常驻分组：与独立目标同属性，每个工作区都有、不可删除）\n`,
+      "utf8",
+    );
+    created.push(def.slug);
+    appendEvent(root, { actor, event: "autopilot.group_created", details: { slug: def.slug, name: def.name } });
+  } else {
+    mkdirSync(join(dir, "goals"), { recursive: true });
+  }
+  const pr = def.prompt && String(def.prompt).trim();
+  if (pr) {
+    const st = readAutopilotState(root);
+    const prompts = { ...(st.lanePrompts ?? {}) };
+    if (!prompts[def.slug] || !String(prompts[def.slug]).trim()) {
+      prompts[def.slug] = String(pr);
+      writeAutopilotState(root, { lanePrompts: prompts }, { actor });
+      promptsSeeded.push(def.slug);
+    }
+  }
 }
 
 /**
- * 自愈创建：保证本工作区一定存在这三个常驻分组（缺目录/version.md 就补建；缺职责提示词就补默认）。
- * 只补缺，绝不覆盖已有内容。返回本次实际创建/补种的 slug。
+ * [v0.27] 问题 13：自建「常驻功能分组」。
+ * - name 必填；slug 由名称 slugify（保留中文），与内置/已有自建/同名版本冲突则报错；
+ * - scope="workspace"（默认）→ 写 <root>/autopilot-groups.json；scope="global" → 写 <home>/.dsh/group-defs.json；
+ * - 两种 scope 都会立即物化到当前工作区（global 定义同样在本工作区生效）；
+ * - 分组与内置三条同属性：受删除保护（isProtectedVersion 认自建 slug）。
+ */
+export function createGroup(
+  root: string,
+  input: { name: string; scope?: string | null; prompt?: string | null },
+  actor: string,
+): { ok: true; slug: string; name: string; scope: "workspace" | "global" } {
+  const name = String(input?.name ?? "").trim();
+  if (!name) throw new GraphError("分组名称不能为空");
+  const scope: "workspace" | "global" = input?.scope === "global" ? "global" : "workspace";
+  const slug = slugifyGroupName(name);
+  if (!slug) throw new GraphError(`无法从名称生成合法 slug：${name}`);
+  if (isDefaultGroup(slug)) throw new GraphError(`「${slug}」与内置分组冲突（交互/部署测试/后端为内置常驻分组，换一个名称）`);
+  if ([...readWorkspaceGroups(root), ...readGlobalGroupDefs()].some((g) => g.slug === slug)) {
+    throw new GraphError(`分组已存在：${slug}（同名分组无需重复创建）`);
+  }
+  // 同名普通版本占用该 slug：拒绝，避免把既有版本悄悄变成分组
+  if (existsSync(join(root, "versions", slug, "version.md"))) {
+    throw new GraphError(`versions/${slug} 已被同名版本占用，换一个名称`);
+  }
+  const prompt = input?.prompt == null ? null : (String(input.prompt).trim() || null);
+  const def: GroupDefinition = {
+    slug,
+    name,
+    scope,
+    prompt,
+    created_at: new Date().toISOString(),
+    created_by: actor,
+  };
+  if (scope === "workspace") {
+    const list = readWorkspaceGroups(root);
+    list.push(def);
+    writeWorkspaceGroups(root, list);
+  } else {
+    const list = readGlobalGroupDefs();
+    list.push(def);
+    writeGlobalGroupDefs(list);
+  }
+  const created: string[] = [];
+  const promptsSeeded: string[] = [];
+  materializeGroup(root, { slug, name, prompt }, actor, created, promptsSeeded);
+  appendEvent(root, {
+    actor,
+    event: "autopilot.group_created",
+    details: { slug, name, scope, source: "user" },
+  });
+  return { ok: true, slug, name, scope };
+}
+
+/**
+ * 自愈创建：保证本工作区一定存在这些常驻分组（内置三条 + 自建定义），缺目录/version.md 就补建，
+ * 缺职责提示词就补默认。只补缺，绝不覆盖已有内容。返回本次实际创建/补种的 slug。
  */
 export function ensureGroups(root: string, actor = "system:autopilot"): { created: string[]; promptsSeeded: string[] } {
   const created: string[] = [];
   const promptsSeeded: string[] = [];
-  for (const g of DEFAULT_GROUPS) {
-    const dir = join(root, "versions", g.slug);
-    const vfile = join(dir, "version.md");
-    if (!existsSync(vfile)) {
-      mkdirSync(join(dir, "goals"), { recursive: true });
-      const doc = {
-        id: `v-grp-${g.slug}`,
-        name: g.name,
-        status: "active",
-        created_at: new Date().toISOString(),
-        created_by: actor,
-        group: true,
-      };
-      writeFileSync(
-        vfile,
-        `---\n${JSON.stringify(doc, null, 2)}\n---\n\n## 范围\n\n（常驻分组：与独立目标同属性，每个工作区都有、不可删除）\n`,
-        "utf8",
-      );
-      created.push(g.slug);
-      appendEvent(root, { actor, event: "autopilot.group_created", details: { slug: g.slug, name: g.name } });
-    } else {
-      mkdirSync(join(dir, "goals"), { recursive: true });
-    }
-    const st = readAutopilotState(root);
-    const prompts = { ...(st.lanePrompts ?? {}) };
-    if (!prompts[g.slug] || !String(prompts[g.slug]).trim()) {
-      prompts[g.slug] = g.prompt;
-      writeAutopilotState(root, { lanePrompts: prompts }, { actor });
-      promptsSeeded.push(g.slug);
-    }
+  for (const g of DEFAULT_GROUPS) materializeGroup(root, { slug: g.slug, name: g.name, prompt: g.prompt }, actor, created, promptsSeeded);
+  // [v0.27] 问题 13：自建分组（workspace 定义 + 全局定义）同样物化到本工作区（只补缺；单个失败不影响其它）
+  const seen = new Set(DEFAULT_GROUP_SLUGS);
+  for (const g of [...readWorkspaceGroups(root), ...readGlobalGroupDefs()]) {
+    if (seen.has(g.slug)) continue;
+    seen.add(g.slug);
+    try {
+      materializeGroup(root, { slug: g.slug, name: g.name, prompt: g.prompt }, actor, created, promptsSeeded);
+    } catch { /* 单个分组物化失败不影响看板数据 */ }
   }
   return { created, promptsSeeded };
 }
@@ -1577,4 +1792,71 @@ export function restoreGoalToDraft(root: string, id: string, actor: string): { o
     throw new GraphError(`已取消归档，但无法移入草稿：${(e as any)?.message ?? e}（带 cards/attempts 附件的目标不能平铺进草稿，可先恢复到原泳道或独立目标）`);
   }
   return { ok: true, id: gid };
+}
+
+/**
+ * [v0.27] 问题 22：带附件（cards/ attempts/ 等）的目标也能移回草稿并暂存。
+ * 与 moveGoal({to:"backlog"}) 的差别：**保留目录形态** backlog/<id>/goal.md，
+ * 附件目录随目标目录整体迁移，不再因「不能平铺」被拒绝。
+ * - meta.status 置 draft、meta.version 置 null（与 moveGoal 进 backlog 的状态口径一致）；
+ * - 归档态目标先取消归档（回原泳道）再迁移，保证 archived 标记与事件口径一致；
+ * - backlog/<id>/goal.md（或同名平铺 backlog/<id>.md）已存在时报错，绝不覆盖。
+ * 读取端兼容：core/ops.ts 的 listGoalFiles / boardProjection / backlogGoals / countBacklogGoals
+ * 与 core/autopilot.ts 的 existingGoalTitles / scanExistingTitles / listArchived 均已同时接受两种形态。
+ */
+export function moveGoalToDraftForce(root: string, id: string, opts: { actor: string }): { ok: true; id: string; file: string } {
+  const gid = String(id ?? "").trim();
+  if (!gid || gid.includes("/") || gid.includes("\\") || gid === "." || gid === "..") {
+    throw new GraphError(`非法目标 id：${id}`);
+  }
+  const actor = opts?.actor ?? "system:autopilot";
+  let file = findGoalFile(root, gid);
+  let doc = loadGoal(file);
+  if (doc.meta.archived) {
+    // 归档目标不能被「静默」搬进草稿：先按标准流程取消归档，再统一迁移
+    unarchiveGoal(root, gid, { actor });
+    file = findGoalFile(root, gid);
+    doc = loadGoal(file);
+  }
+  const srcDir = basename(file) === "goal.md" ? dirname(file) : null;
+  const targetDir = join(root, "backlog", gid);
+  const targetFile = join(targetDir, "goal.md");
+  const flatFile = join(root, "backlog", `${gid}.md`);
+  if (file !== targetFile) {
+    if (existsSync(targetFile)) throw new GraphError(`草稿位置已存在：backlog/${gid}/goal.md（拒绝覆盖，请先处理同名草稿）`);
+    // 平铺同名草稿只有在**不是本目标自身**时才算冲突（平铺 → 目录形态是本函数的正常迁移方向）
+    if (flatFile !== file && existsSync(flatFile)) throw new GraphError(`草稿位置已有平铺文件：backlog/${gid}.md（拒绝覆盖，请先处理同名草稿）`);
+    if (srcDir) {
+      if (existsSync(targetDir)) {
+        // 空目录残留：清掉再落位（不丢数据）；非空一律拒绝，绝不覆盖
+        let leftovers: string[] = [];
+        try { leftovers = readdirSync(targetDir); } catch { leftovers = ["?"]; }
+        if (leftovers.length > 0) throw new GraphError(`草稿位置已存在非空目录：backlog/${gid}/（拒绝覆盖）`);
+        rmSync(targetDir, { recursive: true, force: true });
+      }
+      // [autopilot-fork] Windows 语义（同 moveGoal）：只建父目录 backlog/，让 rename 自己落地最后一级
+      mkdirSync(join(root, "backlog"), { recursive: true });
+      renameSync(srcDir, targetDir); // 目录整体迁移：cards/ attempts/ 一起走
+    } else {
+      // 平铺草稿 backlog/<id>.md → 目录形态 backlog/<id>/goal.md
+      mkdirSync(targetDir, { recursive: true });
+      renameSync(file, targetFile);
+    }
+  }
+  doc.meta.status = "draft";
+  doc.meta.version = null;
+  saveGoal(targetFile, doc);
+  appendEvent(root, {
+    actor,
+    event: "goal.moved",
+    goal: gid,
+    details: { from: relative(root, file), to: relative(root, targetFile), forced: true },
+  });
+  appendEvent(root, {
+    actor,
+    event: "autopilot.goal_forced_to_draft",
+    goal: gid,
+    details: { file: relative(root, targetFile), had_dir_attachments: !!srcDir },
+  });
+  return { ok: true, id: gid, file: relative(root, targetFile) };
 }

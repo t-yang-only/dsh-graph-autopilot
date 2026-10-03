@@ -44,6 +44,63 @@
       const tagFilterGuard = useBackdropClose(() => setShowTagFilterModal(false));
       const tagsFor = (g) => Array.isArray(g?.tags) ? g.tags : [];
       const matchesTag = (g) => !tagFilter.length || tagsFor(g).some((tag) => tagFilter.includes(String(tag)));
+      // [v0.27] 问题 17：按「类型」筛选（feature/bug/task/improvement/patch/chore，多选）。
+      // 与标签筛选是「与」关系：同时激活时必须同时满足；与搜索命中/已归档过滤叠加生效。
+      const [typeFilter, setTypeFilter] = React.useState([]);
+      const matchesType = (g) => !typeFilter.length || typeFilter.includes(normalizeGoalType(g?.type));
+      // [v0.27] 问题 22：目标卡片操作区「→ 草稿」——回收站行（autopilot.js）的同类按钮不带 force，
+      // 带 cards/attempts 附件的目标会被后端拒绝；这里从看板卡片直接走 force 路径
+      // （后端中断执行并把整个目标目录暂存进草稿）。失败时用既有 showToast 展示后端 error。
+      const [draftBusyId, setDraftBusyId] = React.useState(null);
+      const sendGoalToDraft = (goalId) => {
+        // [v0.27] i18n-keep(category-a)：本函数内新增的用户可见提示文案按要求直接使用中文（不新增 i18n 词条）
+        if (!goalId || draftBusyId) return;
+        if (typeof window.confirm === "function"
+          && !window.confirm("确认把该目标「→ 草稿」？\n会中断正在进行的执行，并把整个目标目录（含卡片/执行记录）暂存进草稿泳道。")) return;
+        setDraftBusyId(goalId);
+        fetch("/api/dsh-graph-autopilot/trash", {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspace: activeWs, action: "to-draft", goal: goalId, force: true }),
+        })
+          .then((r) => r.json().then((d) => ({ ok: r.ok, d })).catch(() => ({ ok: r.ok, d: {} })))
+          // [v0.27] i18n-keep(category-a)：结果提示（成功/失败/后端 error 前缀）为中文
+          .then(({ ok, d }) => {
+            if (!ok || !d?.ok) { showToast("→ 草稿失败：" + (d?.error ?? "未知错误")); return; }
+            showToast("✅ 已移入草稿" + (d?.restored ? "：" + d.restored : ""));
+            load();
+          })
+          .catch((e) => { showToast("→ 草稿失败：" + String(e?.message ?? e)); })
+          .finally(() => setDraftBusyId(null));
+      };
+      // [v0.27] 把「→ 草稿」动作挂到卡片上（不改 card.js）：卡片元素**原样透传**进一层轻量容器，
+      // 动作行作为容器的第二个子节点渲染在卡片下方 —— 不新建/不复制 .dg-card 元素，
+      // 保持 g-366「每张命中卡只渲染一次」与 cardEls 计数契约；容器 CSS 补齐 backlog 平铺档的宽度口径。
+      const DRAFT_ACTION_CSS = [
+        ".dg-draft-wrap{min-width:0}",
+        ".dg-backlog-flat>.dg-draft-wrap{flex:0 0 220px;width:220px;box-sizing:border-box}",
+        ".dg-backlog-flat-vertical>.dg-draft-wrap{flex:1 1 100%;width:100%;min-width:0}",
+        ".dg-draft-action{opacity:.45;transition:opacity .12s ease}",
+        ".dg-draft-wrap:hover .dg-draft-action,.dg-draft-wrap:focus-within .dg-draft-action{opacity:1}",
+      ].join("");
+      const withDraftAction = (cardEl) => {
+        const goalId = cardEl?.props?.["data-goal-id"]; // Card 根节点 data-goal-id 即目标 id
+        if (!cardEl || !goalId) return cardEl;
+        // [v0.27] i18n-keep(category-a)：卡片动作按钮的标签与 tooltip 为中文
+        const actionRow = h("div", {
+          key: "draft-action",
+          className: "dg-draft-action",
+          style: { display: "flex", justifyContent: "flex-end", marginTop: 2, marginBottom: 4, minWidth: 0 },
+        },
+          h("button", {
+            className: "dg-btn",
+            style: { ...S.btn, fontSize: 10, padding: "1px 6px", lineHeight: 1.4, whiteSpace: "nowrap" },
+            title: "→ 草稿：中断执行并把整个目标目录暂存进草稿（含卡片与执行记录，force）",
+            disabled: draftBusyId === goalId,
+            onClick: (e) => { e.stopPropagation(); sendGoalToDraft(goalId); },
+          }, draftBusyId === goalId ? "…" : "→ 草稿"));
+        return h("div", { key: cardEl.key ?? goalId, className: "dg-draft-wrap", style: { minWidth: 0 } }, cardEl, actionRow);
+      };
       // g-223: 版本管理抽屉与显隐过滤状态（本地存储持久化，按当前解析 workspace 隔离与响应）
       const [showVersionDrawer, setShowVersionDrawer] = React.useState(false);
       // Compatibility marker: const activeWs = resolveWorkspaceOfSession(props?.sessionId) || "default" (intentionally not used).
@@ -911,7 +968,7 @@
       const headExpandedNeedRef = React.useRef(0);
       // 头部内容键：内容变化（标签筛选激活、搜索计数/反馈、已归档开关）也要重测自然宽度
       const headContentKey = [
-        tagFilter.length, searchActiveQuery ? 1 : 0, searchMatches.length,
+        tagFilter.length, typeFilter.length, searchActiveQuery ? 1 : 0, searchMatches.length,
         searchFeedback ? 1 : 0, searchFullText ? 1 : 0, showArchived ? 1 : 0,
       ].join("|");
       React.useLayoutEffect(() => {
@@ -1438,7 +1495,7 @@
       // g-77647351：泳道渲染（带拖放支持，跨 lane 拖放改归属）；g-129 版本 lane 标题「＋」预选版本
       // g-137：laneIndex 用于交替背景色；g-162：阶段列横向交替深浅
       const lane = (label, goals, key, version, laneIndex = 0, collapsible = true, vertical = false) => {
-        goals = goals.filter(matchesTag);
+        goals = goals.filter((g) => matchesTag(g) && matchesType(g)); // [v0.27] 问题 17：类型筛选并入（与标签为「与」关系）
         // g-352：单泳道档（g-356 起 <480px）下面板已退化为全宽单列，阶段纵向堆叠——
         // 此时交付/阻塞列不再走 36px 竖条折叠形态（竖条在纵向堆叠里不可读且无意义），
         // 一律按展开态渲染；宽档（≥480px）仍用原折叠语义。
@@ -1676,6 +1733,7 @@
               const expanded = expandedGoals[g.id] ?? defExpanded;
               const isDragTarget = isOverThisCell && drag.overGoalId === g.id;
               const mInfo = matchedGoalMap.get(g.id);
+              // [v0.27] 问题 22：卡片下挂「→ 草稿」动作（外层轻量容器，不改 card.js）
               return Card({
                 ...g,
                 _tags: tagsFor(g),
@@ -1728,7 +1786,7 @@
                 },
                 () => { forceFreshRef.current = true; load(); },
               );
-            }),
+            }).map((el) => withDraftAction(el)), // [v0.27] 问题 22：卡片追加「→ 草稿」动作
           );
         });
         // g-162: 统一基础背景层级
@@ -1828,6 +1886,8 @@
         // 单列网格（纵向档）里没有第 2 条网格线，内容/标题必须占满整行
         const rowSpan = vertical ? "1 / -1" : "2 / -1";
         const backlogBg = "rgba(0,0,0,.12)";
+        // [v0.27] 问题 17：草稿泳道同样参与类型筛选（既有标签筛选不含 backlog，故此处只并入类型条件）
+        goals = (goals ?? []).filter(matchesType);
         // g-258: 优先使用实际已加载条数，未展开懒加载时回退 backlog_count 计数
         const count = (goals && goals.length > 0) ? goals.length : (b?.backlog_count ?? 0);
         // g-162: 折叠态——显示摘要行（g-288: 支持拖放到折叠泳道）
@@ -1953,6 +2013,7 @@
               const expanded = expandedGoals[g.id] ?? defExpanded;
               const isDragTarget = isOverThisCell && drag?.overGoalId === g.id;
               const mInfo = matchedGoalMap.get(g.id);
+              // [v0.27] 问题 22：草稿泳道卡片同样追加「→ 草稿」入口（后端若判定无需迁移则原样报错）
               return Card({
                 ...g,
                 _tags: tagsFor(g),
@@ -2000,7 +2061,7 @@
                 },
                 () => { forceFreshRef.current = true; load(); },
               );
-            }),
+            }).map((el) => withDraftAction(el)), // [v0.27] 问题 22：卡片追加「→ 草稿」动作
           ),
         );
         let contentEl = flatCell;
@@ -2124,7 +2185,7 @@
               whiteSpace: "nowrap",
             },
           }, dgT("search.groupLabel", { name: searchGroupLabel(grp), count: grp.items.length })));
-          for (const m of grp.items) groupEls.push(matchCard(m));
+          for (const m of grp.items) groupEls.push(withDraftAction(matchCard(m))); // [v0.27] 问题 22：命中卡同样可「→ 草稿」
         }
         return [labelEl, h("div", {
           key: "search-lane-cards",
@@ -2433,10 +2494,15 @@
       //  排成整行、每行图标 + 文字；「版本管理 / 创建版本」不再进弹层（att-005 第 B-2 项：回到网格
       //  左上角原位置、靠左对齐）。宽档平铺保留原有的字面量渲染与动作/tooltip。
       //  标签（图标 + 文字）由 headPanelEntry 统一派生。）
+      // [v0.27] 筛选入口文案（标签数 + 类型数；两者共用同一个筛选弹窗，激活时按钮高亮）。
+      // i18n-keep(category-a)：新增的「类型 N」后缀为中文
+      const tagFilterBtnLabel = dgT("tagFilter.title")
+        + (tagFilter.length > 0 ? ` (${tagFilter.length})` : "")
+        + (typeFilter.length > 0 ? ` · 类型 ${typeFilter.length}` : "");
       const headPanelRows = [
         { key: "refresh", label: dgT("common.refresh"), title: dgT("common.refresh"), action: load },
-        { key: "tagfilter", label: tagFilter.length > 0 ? dgT("tagFilter.title") + ` (${tagFilter.length})` : dgT("tagFilter.title"), title: dgT("tagFilter.title"), action: () => setShowTagFilterModal(true) },
-        tagFilter.length > 0 ? { key: "tagclear", label: dgT("tagFilter.clear"), title: dgT("tagFilter.clear"), action: () => setTagFilter([]) } : null,
+        { key: "tagfilter", label: tagFilterBtnLabel, title: dgT("tagFilter.title"), action: () => setShowTagFilterModal(true) },
+        (tagFilter.length > 0 || typeFilter.length > 0) ? { key: "tagclear", label: dgT("tagFilter.clear"), title: dgT("tagFilter.clear"), action: () => { setTagFilter([]); setTypeFilter([]); } } : null,
         { key: "memory", label: dgT("memory.btn"), title: dgT("memory.title"), action: () => setShowMemoryModal(true) },
         { key: "shared", label: dgT("shared.title"), title: dgT("shared.title"), action: () => setShowSharedPanel(true) },
         { key: "settings", label: dgT("settings.title"), title: dgT("settings.title"), action: () => setShowSettings(true) },
@@ -2627,6 +2693,8 @@
              }
            } : undefined },
         h("style", null, HOVER_CSS),
+        // [v0.27] 卡片「→ 草稿」动作的悬停显隐样式（默认淡显，悬停整卡/键盘聚焦时高亮）
+        h("style", null, DRAFT_ACTION_CSS),
         // g-352 att-005：头部（标题 + 版本链接 + 更新时间 + 工具条 + DEBUG + 搜索框）是**两个宿主
         // 共用的同一份实现**（同一个 KanbanView，零 host 门控），class 与样式在两侧完全一致。
         // style 仍是 S.head 本体（不新增样式键）；布局兜底走 .dg-head（见 constants.js：
@@ -2660,14 +2728,14 @@
           //（toolbarCollapsedByFit）⇒ 头部始终单行，绝不把按钮压成竖排。
           // 折叠时只收这六项 + 显示已归档开关（headPanelItems），每行图标 + 文字。
           toolbarCollapsed ? null : h("button", { style: tbBtnStyle, className: "dg-btn", onClick: load }, dgT("common.refresh")),
-          // g-187：顶部标签筛选弹层入口
+          // g-187：顶部标签筛选弹层入口（[v0.27] 同时反映类型筛选激活态与计数）
           toolbarCollapsed ? null : h("button", {
-            style: { ...tbBtnStyle, ...(tagFilter.length > 0 ? { borderColor: "var(--dsw-alias-state-business-primary, #4c8dff)", background: "rgba(76,141,255,.15)" } : {}) },
-            className: "dg-btn" + (tagFilter.length > 0 ? " dg-btn-active" : ""),
+            style: { ...tbBtnStyle, ...((tagFilter.length > 0 || typeFilter.length > 0) ? { borderColor: "var(--dsw-alias-state-business-primary, #4c8dff)", background: "rgba(76,141,255,.15)" } : {}) },
+            className: "dg-btn" + ((tagFilter.length > 0 || typeFilter.length > 0) ? " dg-btn-active" : ""),
             title: dgT("tagFilter.title"),
             onClick: () => setShowTagFilterModal(true),
-          }, tagFilter.length > 0 ? dgT("tagFilter.title") + ` (${tagFilter.length})` : dgT("tagFilter.title")),
-          toolbarCollapsed || tagFilter.length === 0
+          }, tagFilterBtnLabel),
+          toolbarCollapsed || (tagFilter.length === 0 && typeFilter.length === 0)
             ? null
             : h("button", {
                 className: "dg-btn",
@@ -2676,7 +2744,7 @@
                 // 标签筛选激活时同行按钮「有大有小」。仅保留它特有的 4px 左间距。
                 style: { ...S.btn, ...rowBtnStyle(), marginLeft: 4 },
                 title: dgT("tagFilter.clear"),
-                onClick: () => setTagFilter([]),
+                onClick: () => { setTagFilter([]); setTypeFilter([]); }, // [v0.27] 一并清除类型筛选
               }, dgT("tagFilter.clear")),
           // g-105: 记忆管理按钮（位于设置按钮左侧）
           toolbarCollapsed ? null : h("button", {
@@ -3378,7 +3446,7 @@
           : null,
         // g-132: 看板设置弹窗（gear 入口）
         showSettings
-          ? h(SettingsModal, { key: "dg-settings-modal", onClose: () => setShowSettings(false), onSaved: () => load() })
+          ? h(SettingsModal, { key: "dg-settings-modal", workspace: activeWs, onClose: () => setShowSettings(false), onSaved: () => load() }) // [v0.27] 设置弹窗内的评审模式/泳道模型需要按当前工作区读写 manager 端点
           : null,
         // g-183: 共享上下文管理面板（🔗 入口）
         showSharedPanel
@@ -3489,6 +3557,38 @@
                   dgT("tagFilter.title"),
                   h("span", { style: { ...S.meta, fontSize: 11, fontWeight: 400 } }, "")),
                 h("div", { style: { ...S.meta, marginBottom: 10 } }, ""),
+                // [v0.27] 问题 17：按「类型」筛选 chips（多选；与标签筛选为「与」关系）。
+                // 颜色用类型专色（显式 hex，不依赖主题变量，避免本机主题解析成白色）。
+                // i18n-keep(category-a)：本段小节标题与说明文字为中文
+                h("div", { style: { fontWeight: 600, fontSize: 12, marginBottom: 6 } }, "类型"),
+                h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 4 } },
+                  GOAL_TYPES.map((t) => {
+                    const selected = typeFilter.includes(t);
+                    const tColor = goalTypeColor(t);
+                    return h("button", {
+                      key: "type-" + t,
+                      className: "dg-btn",
+                      style: {
+                        ...S.btn,
+                        fontSize: 12,
+                        padding: "3px 8px",
+                        borderRadius: 12,
+                        background: selected ? tColor : tColor + "1f",
+                        color: selected ? "#fff" : tColor,
+                        border: "1.5px solid " + (selected ? tColor : tColor + "66"),
+                        boxShadow: selected ? "none" : "inset 0 0 6px " + tColor + "22",
+                      },
+                      title: GOAL_TYPE_LABELS[t] ?? t,
+                      onClick: () => {
+                        if (selected) setTypeFilter(typeFilter.filter((x) => x !== t));
+                        else setTypeFilter([...typeFilter, t]);
+                      },
+                    }, (selected ? "✓ " : "") + GOAL_TYPE_ABBREV[t] + " " + (GOAL_TYPE_LABELS[t] ?? t));
+                  })),
+                // i18n-keep(category-a)：类型筛选说明 + 「标签」小节标题为中文
+                h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, marginBottom: 12 } },
+                  "类型与标签是「与」关系：同时选中时，只显示同时满足两类条件的目标（与搜索、已归档过滤一起生效）。"),
+                h("div", { style: { fontWeight: 600, fontSize: 12, marginBottom: 6 } }, "标签"),
                 h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, maxHeight: 220, overflowY: "auto", padding: "2px 0", marginBottom: 12 } },
                   (() => {
                     const allAvailableTags = [...new Set(allGoals.flatMap((g) => tagsFor(g)))].sort();
@@ -3515,9 +3615,13 @@
                     });
                   })()),
                 h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(128,128,128,.2)", paddingTop: 10 } },
-                  h("span", { style: S.meta }, dgT("tagFilter.selected", { count: tagFilter.length })),
+                  // i18n-keep(category-a)：类型计数后缀与「清除类型筛选」按钮为中文
+                  h("span", { style: S.meta }, dgT("tagFilter.selected", { count: tagFilter.length })
+                    + (typeFilter.length > 0 ? ` · 类型 ${typeFilter.length}` : "")),
                   h("div", { style: { display: "flex", gap: 8 } },
                     tagFilter.length > 0 ? h("button", { className: "dg-btn", style: S.btn, onClick: () => setTagFilter([]) }, dgT("tagFilter.clear")) : null,
+                    // [v0.27] 问题 17：清除类型筛选（独立入口；标签的清除入口沿用上面的「清除筛选」）
+                    typeFilter.length > 0 ? h("button", { className: "dg-btn", style: S.btn, onClick: () => setTypeFilter([]) }, "清除类型筛选") : null,
                     h("button", { className: "dg-btn", style: S.btnPrimary, onClick: () => setShowTagFilterModal(false) }, dgT("common.ok"))))))
           : null,
         // g-134: 删除版本泳道确认弹窗

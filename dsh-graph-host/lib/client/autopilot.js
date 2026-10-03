@@ -1,4 +1,4 @@
-// [autopilot-fork] 自动驾驶面板 + 模板行 —— 推荐卡/模板卡（标准卡片，可拖进泳道直接建目标）+ 全局目标/全局提示词 + 行执行 ▶/⏸ + 归档行。
+// [autopilot-fork] 自动驾驶面板 + 模板行 —— 推荐卡/模板卡（标准卡片，可拖进泳道直接建目标）+ 全局目标/全局提示词 + 执行状态行（启停在泳道行头 ▶/■）+ 归档行。
 // 工厂作用域组件；自取数据（/api/dsh-graph-autopilot/*），不侵入看板数据流。
 // 拖拽协议：卡片 onDragStart 记 apDragPick（工厂作用域），看板泳道落点 onDrop 调 apAdoptIntoLane(target)。
 //   target = 版本 slug（落进该版本）| "standalone"（独立目标）| null（草稿/backlog）
@@ -173,8 +173,8 @@ function AutopilotPanel(props) {
   const [laneText, setLaneText] = React.useState("");
   const [lanePrompts, setLanePrompts] = React.useState({});
   const [laneOpen, setLaneOpen] = React.useState(false);
-  const [noHints, setNoHints] = React.useState(apNoHintsOn()); // [v0.25] 无提示模式
-  const [laneDraft, setLaneDraft] = React.useState({});        // [v0.25] 按泳道选模型的草稿
+  // [v0.27] 推荐列表折叠开关（默认展开；折叠时只留「条数 + 提示」一行摘要）
+  const [recsOpen, setRecsOpen] = React.useState(true);
   const [mgrOpen, setMgrOpen] = React.useState(false);
   const [collab, setCollab] = React.useState({ messages: [], claims: [] });
   const [collabOpen, setCollabOpen] = React.useState(false);
@@ -295,45 +295,99 @@ function AutopilotPanel(props) {
   // 推荐卡类型 → 粗左边框色（与看板卡片视觉约定一致）
   const typeColor = { feature: "#4c8dff", bug: "#e05a5a", task: "#3ecf8e", improvement: "#b07cff", patch: "#e0a53a", chore: "#8a8f98" };
 
+  // [v0.27] 采纳所选推荐（version=null，先落草稿）→ 紧接着运行管理 AI：
+  // 管理 AI 读看板与协作频道，自行决定把任务放到哪条泳道、建什么连线（其上行文已含「自由编排任务」职责）。
+  const adoptAndManage = () => {
+    if (busy) return;
+    if (pickedIdxs.length === 0) { setMsg("请先勾选要采纳的推荐，再点「采纳并由管理 AI 分配」"); return; }
+    setBusy("adopt-manager");
+    setMsg("… 正在采纳所选推荐…");
+    let createdText = "";
+    fetch("/api/dsh-graph-autopilot/adopt", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, picks: pickedIdxs, version: null }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { setMsg("❌ 采纳失败：" + (d?.error ?? "未知错误")); return null; }
+        createdText = (d?.created ?? []).map((c) => `${c.id} ${c.title}`).join("、") || "—";
+        setPicked({});
+        setMsg("✅ 已采纳：" + createdText + "；🤖 正在唤起管理 AI 分配…");
+        return fetch("/api/dsh-graph-autopilot/manager", {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspace, action: "run" }),
+        }).then((r) => r.json().then((d2) => ({ ok: r.ok, d2 })));
+      })
+      .then((res) => {
+        if (!res) return;
+        if (!res.ok) { setMsg("✅ 已采纳：" + createdText + "；❌ 管理 AI 启动失败：" + (res.d2?.error ?? "未知错误")); return; }
+        setMsg("✅ 已采纳：" + createdText + "；🤖 管理 AI 已启动（" + (res.d2?.child_id ?? "") + "），它会读看板与协作频道，自行决定放到哪条泳道、建哪些连线");
+        window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { manager: res.d2 } }));
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => { setBusy(""); load(); });
+  };
+
   return h("div", {
     "data-autopilot-panel": "",
     style: { display: "flex", flexDirection: "column", gap: 8, margin: "14px 0 10px", padding: "10px 12px", borderRadius: 10, border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", background: "var(--dsw-alias-fill-tsp-primary, rgba(128,128,128,.06))", fontSize: 12 },
   },
-    // —— 推荐行（标准卡片，可拖进泳道） ——
+    // —— 推荐行（标准卡片，可拖进泳道）—— [v0.27] 可折叠（点标题行或「收起/展开」按钮，默认展开）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
-      h("strong", { style: { flexShrink: 0 } }, "💡 推荐"),
-      h("button", { style: btn, disabled: !!busy, onClick: () => post("scan", {}).then(load) }, busy === "scan" ? "扫描中…" : "扫描推荐"),
+      h("strong", {
+        style: { flexShrink: 0, cursor: "pointer", userSelect: "none" },
+        title: "点此展开 / 收起推荐列表",
+        onClick: () => setRecsOpen((o) => !o),
+      }, (recsOpen ? "▾ " : "▸ ") + "💡 推荐"),
       h("button", {
-        style: btn, disabled: !!busy,
-        title: "完整扫描：拉一个子代理深度分析工作区与项目正式文件（README/构建配置/提交历史等），再由 AI 回写推荐清单",
-        onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) setMsg("🔍 完整扫描已启动（子代理 " + (d.child_id ?? "") + "），完成后推荐清单会自动更新"); return load(); }),
-      }, busy === "deep-scan" ? "启动中…" : "🔍 完整扫描"),
-      // [v0.19] 按输入内容做推荐（走完整扫描，把输入作为本次推荐方向）
-      h("input", {
-        style: { ...input, minWidth: 200, flex: "1 1 200px" },
-        placeholder: "输入推荐方向（如：把部署脚本补齐 / 修掉登录超时）→ 按它推荐",
-        value: recHint,
-        onChange: (e) => setRecHint(e.target.value),
-        onKeyDown: (e) => { if (e.key === "Enter" && recHint.trim()) post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) setMsg("🔍 已按输入启动推荐扫描"); return load(); }); },
-      }),
-      h("button", {
-        style: { ...btn, background: recHint.trim() ? "#3b7ddd" : undefined, borderColor: recHint.trim() ? "#3b7ddd" : undefined, color: recHint.trim() ? "#fff" : "inherit" },
-        disabled: !!busy || !recHint.trim(),
-        title: "按你输入的内容生成推荐（把输入作为本次推荐方向，交给 AI 深度扫描）",
-        onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) { setMsg("🔍 已按输入启动推荐扫描"); setRecHint(""); } return load(); }),
-      }, "按输入推荐"),
+        style: btn,
+        title: "展开 / 收起推荐列表与操作按钮",
+        onClick: () => setRecsOpen((o) => !o),
+      }, recsOpen ? "收起" : "展开"),
       h("span", { style: chip }, recs.length + " 条"),
-      h("span", { style: { opacity: 0.65 } }, "把卡片拖到任意泳道即可建目标执行；或勾选后批量采纳"),
-      pickedIdxs.length > 0 && h("button", { style: btn, disabled: !!busy, onClick: () => post("adopt", { picks: pickedIdxs, version: null }).then(() => { setPicked({}); load(); }) }, "采纳所选 → backlog"),
-      pickedIdxs.length > 0 && versions.length > 0 && h(React.Fragment, null,
-        h("select", { style: input, value: runVersion, onChange: (e) => setRunVersion(e.target.value) },
-          h("option", { value: "" }, "选择版本…"),
-          versions.map((v) => h("option", { key: v, value: v }, v)),
+      !recsOpen && h("span", { className: "dg-hint", style: { opacity: 0.65 } }, "已收起；点标题或「展开」查看、勾选与采纳推荐"),
+      recsOpen && h(React.Fragment, null,
+        h("button", { style: btn, disabled: !!busy, onClick: () => post("scan", {}).then(load) }, busy === "scan" ? "扫描中…" : "扫描推荐"),
+        h("button", {
+          style: btn, disabled: !!busy,
+          title: "完整扫描：拉一个子代理深度分析工作区与项目正式文件（README/构建配置/提交历史等），再由 AI 回写推荐清单",
+          onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) setMsg("🔍 完整扫描已启动（子代理 " + (d.child_id ?? "") + "），完成后推荐清单会自动更新"); return load(); }),
+        }, busy === "deep-scan" ? "启动中…" : "🔍 完整扫描"),
+        // [v0.19] 按输入内容做推荐（走完整扫描，把输入作为本次推荐方向）
+        h("input", {
+          style: { ...input, minWidth: 200, flex: "1 1 200px" },
+          placeholder: "输入推荐方向（如：把部署脚本补齐 / 修掉登录超时）→ 按它推荐",
+          value: recHint,
+          onChange: (e) => setRecHint(e.target.value),
+          onKeyDown: (e) => { if (e.key === "Enter" && recHint.trim()) post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) setMsg("🔍 已按输入启动推荐扫描"); return load(); }); },
+        }),
+        h("button", {
+          style: { ...btn, background: recHint.trim() ? "#3b7ddd" : undefined, borderColor: recHint.trim() ? "#3b7ddd" : undefined, color: recHint.trim() ? "#fff" : "inherit" },
+          disabled: !!busy || !recHint.trim(),
+          title: "按你输入的内容生成推荐（把输入作为本次推荐方向，交给 AI 深度扫描）",
+          onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) { setMsg("🔍 已按输入启动推荐扫描"); setRecHint(""); } return load(); }),
+        }, "按输入推荐"),
+        h("span", { style: { opacity: 0.65 } }, "把卡片拖到任意泳道即可建目标执行；或勾选后批量采纳"),
+        pickedIdxs.length > 0 && h("button", { style: btn, disabled: !!busy, onClick: () => post("adopt", { picks: pickedIdxs, version: null }).then(() => { setPicked({}); load(); }) }, "采纳所选 → backlog"),
+        pickedIdxs.length > 0 && versions.length > 0 && h(React.Fragment, null,
+          h("select", { style: input, value: runVersion, onChange: (e) => setRunVersion(e.target.value) },
+            h("option", { value: "" }, "选择版本…"),
+            versions.map((v) => h("option", { key: v, value: v }, v)),
+          ),
+          h("button", { style: btnPrimary, disabled: !!busy || !runVersion, onClick: () => post("adopt", { picks: pickedIdxs, version: runVersion, run: true }).then(() => { setPicked({}); load(); }) }, "采纳并 ▶ 自动执行"),
         ),
-        h("button", { style: btnPrimary, disabled: !!busy || !runVersion, onClick: () => post("adopt", { picks: pickedIdxs, version: runVersion, run: true }).then(() => { setPicked({}); load(); }) }, "采纳并 ▶ 自动执行"),
+        // [v0.27] 采纳当前勾选 → 紧接着运行管理 AI（它读看板与协作频道，自行决定放哪条泳道、建哪些连线）
+        recs.length > 0 && h("button", {
+          style: { ...btn, background: "#7a5af8", borderColor: "#7a5af8", color: "#fff", fontWeight: 700 },
+          disabled: !!busy,
+          title: "采纳当前勾选的推荐，然后立刻运行管理 AI：它读取看板与协作频道，自行把任务分配到合适泳道并建立连线",
+          onClick: adoptAndManage,
+        }, busy === "adopt-manager" ? "分配中…" : "🤖 采纳并由管理 AI 分配"),
       ),
     ),
-    recs.length > 0 && h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 8 } },
+    recsOpen && recs.length > 0 && h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 8 } },
       recs.map((r, i) => h("div", {
         key: i,
         draggable: true,
@@ -380,13 +434,17 @@ function AutopilotPanel(props) {
         h("span", { style: chip }, st?.state?.autoPreset ? "自动选预设：开" : "自动选预设：关"),
       ),
     ),
-    // —— 行执行（每版本 ▶）——
-    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
-      h("strong", { style: { flexShrink: 0 } }, "▶ 行执行"),
+    // —— [v0.27] 执行状态行（原「▶ 行执行」整行已删：启停由泳道行头 ▶/■ 承担；runner 快照保留在此细字行）——
+    // 评审下拉并非重复功能（行头没有），故随 runner 快照一起挪到这一行，避免丢失唯一入口。
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", padding: "0 0 0 14px", fontSize: 11 } },
+      runner
+        ? h("span", { style: chip }, `执行中: ${runner.version} · 当前 ${runner.current ?? "—"} · 待办 ${(runner.pending ?? []).length} · 完成 ${(runner.done ?? []).length}${(runner.failed ?? []).length ? " · 失败 " + runner.failed.length : ""}${runner.paused ? " · ⏸ " + runner.paused : ""}`)
+        : h("span", { style: { opacity: 0.6 } }, "▶ 当前未在运行"),
+      h("span", { className: "dg-hint" }, runner ? "（在泳道行头点「■ 运行中」即可中断）" : "（在泳道行头点 ▶ 启动本行自动驾驶）"),
       // [v0.18] 评审模式：默认机审（机器门禁后自动裁决）；切到人审则停在「确认」等人
       h("span", { style: chip }, "评审"),
       h("select", {
-        style: { ...input, flex: "0 0 auto", minWidth: 92 },
+        style: { ...input, flex: "0 0 auto", minWidth: 92, fontSize: 11, padding: "1px 6px" },
         value: st?.state?.reviewMode ?? "auto",
         disabled: !!busy,
         title: "机审=机器门禁通过即自动裁决（默认）；人审=停在确认列等负责人裁决",
@@ -395,12 +453,6 @@ function AutopilotPanel(props) {
         h("option", { value: "auto" }, "机审（默认）"),
         h("option", { value: "human" }, "人审"),
       ),
-      runner
-        ? h("button", { style: { ...btn, color: "#e05a5a" }, disabled: !!busy, onClick: () => post("stop", {}).then(load) }, "⏸ 中断本行")
-        : null,
-      runner && h("span", { style: chip }, `执行中: ${runner.version} · 当前 ${runner.current ?? "—"} · 待办 ${(runner.pending ?? []).length} · 完成 ${(runner.done ?? []).length}${(runner.failed ?? []).length ? " · 失败 " + runner.failed.length : ""}${runner.paused ? " · ⏸ " + runner.paused : ""}`),
-      !runner && versions.map((v) => h("button", { key: v, style: btn, disabled: !!busy, title: `自动驾驶 ${v}：逐目标 收集→执行→评审→交付`, onClick: () => post("run", { version: v }).then(load) }, "▶ " + v)),
-      !runner && versions.length === 0 && h("span", { style: { opacity: 0.6 } }, "暂无版本泳道"),
     ),
     // —— 归档行 ——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
@@ -415,49 +467,8 @@ function AutopilotPanel(props) {
     showArch && h("div", { style: { display: "flex", flexDirection: "column", gap: 2, padding: "2px 0 0 14px", opacity: 0.8 } },
       (st?.archived ?? []).map((g, i) => h("span", { key: i, style: chip }, `${g.id} ${g.title} · ${g.from}`)),
     ),
-    // —— [v0.25] 高级：无提示模式 + 按泳道选模型 ——
-    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
-      h("strong", { style: { flexShrink: 0 } }, "⚙ 高级"),
-      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
-        h("input", {
-          type: "checkbox", checked: noHints,
-          onChange: (e) => { setNoHints(e.target.checked); apApplyNoHints(e.target.checked); },
-        }),
-        "无提示模式（一键隐藏所有帮助说明）",
-      ),
-      h("span", { style: AP_ROW_CHIP }, "按泳道选模型"),
-      ...["*", "deploy-test", "interaction", "backend", "standalone", "backlog"].map((lane) => {
-        const cur = (mgr?.laneModels ?? {})[lane] ?? {};
-        const label = lane === "*" ? "默认" : (AP_GROUP_NAMES[lane] ?? lane);
-        return h("span", { key: "lm-" + lane, style: { display: "inline-flex", gap: 3, alignItems: "center" } },
-          h("span", { style: { fontSize: 11, opacity: 0.8 } }, label),
-          h("input", {
-            style: { ...input, width: 76, minWidth: 0 }, placeholder: "provider",
-            value: laneDraft[lane]?.provider ?? cur.provider ?? "",
-            onChange: (e) => setLaneDraft((p) => ({ ...p, [lane]: { ...(p[lane] ?? {}), provider: e.target.value, model: p[lane]?.model ?? cur.model ?? "" } })),
-          }),
-          h("input", {
-            style: { ...input, width: 96, minWidth: 0 }, placeholder: "model",
-            value: laneDraft[lane]?.model ?? cur.model ?? "",
-            onChange: (e) => setLaneDraft((p) => ({ ...p, [lane]: { ...(p[lane] ?? {}), model: e.target.value, provider: p[lane]?.provider ?? cur.provider ?? "" } })),
-          }),
-        );
-      }),
-      h("button", {
-        style: btnPrimary, disabled: !!busy,
-        title: "保存每条泳道的执行子代理模型（留空=沿用全局 executor 配置）",
-        onClick: () => {
-          const next = { ...(mgr?.laneModels ?? {}) };
-          for (const [lane, v] of Object.entries(laneDraft)) {
-            const provider = String(v?.provider ?? "").trim();
-            const model = String(v?.model ?? "").trim();
-            if (!provider && !model) delete next[lane];
-            else next[lane] = { provider: provider || null, model: model || null, reasoning_effort: v?.reasoning_effort ?? null };
-          }
-          mgrSet({ laneModels: next }).then((d) => { if (d?.ok) { setLaneDraft({}); setMsg("✅ 已保存泳道模型"); } });
-        },
-      }, "保存泳道模型"),
-    ),
+    // [v0.27] 「⚙ 高级」（无提示模式 + 按泳道选模型）已整体迁至看板设置（问题 16/23）；
+    // noHints/laneDraft 状态与相关 setter 随块删除，apApplyNoHints/apNoHintsOn/apHint 机制函数保留。
     // —— [v0.18] AI 推荐管理员（独立上行文；实时管理推荐 / 全局目标 / 全局提示词）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "🤖 推荐管理"),
@@ -571,6 +582,7 @@ const AP_PROTECTED_VERSION_SLUGS = ["interaction", "deploy-test", "backend"];
 function isApProtectedVersion(slug) { return AP_PROTECTED_VERSION_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
 // [v0.23] 常驻分组（与 core 的 DEFAULT_GROUPS 保持一致）：与独立目标同属性，无版本语义
 const AP_DEFAULT_GROUP_SLUGS = ["interaction", "deploy-test", "backend"];
+// [v0.27] 面板「⚙ 高级」迁至设置后本文件不再引用；保留给设置面板（按泳道选模型）等工厂作用域代码复用，勿删。
 const AP_GROUP_NAMES = { interaction: "交互", "deploy-test": "部署测试", backend: "后端" };
 function isDefaultGroup(slug) { return AP_DEFAULT_GROUP_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
 
@@ -1123,6 +1135,13 @@ function LinksLayer(props) {
   const [pending, setPending] = React.useState(null); // { id, kind }
   const [tick, setTick] = React.useState(0);
   const [msg, setMsg] = React.useState("");
+  // [v0.27] 连线体验（问题 14）：光标位置（预览线）、悬停卡片（高亮 + 锚点提示）、悬停连线（擦除提示）
+  const [pointer, setPointer] = React.useState(null);       // { x, y } 视口坐标
+  const [hoverCard, setHoverCard] = React.useState(null);   // { id, kind }
+  const [hoverLink, setHoverLink] = React.useState(null);   // 被悬停的连线 id
+  const hoverElRef = React.useRef(null);                    // 被临时高亮的卡片元素 + 其原始样式（还原用）
+  const rafRef = React.useRef(0);                           // 挂起的 rAF（节流光标）
+  const ptrRef = React.useRef(null);                        // rAF 内读取的最新光标
 
   const load = React.useCallback(() => {
     if (!workspace) return;
@@ -1151,7 +1170,12 @@ function LinksLayer(props) {
     window.addEventListener("resize", bump);
     return () => { clearInterval(t); window.removeEventListener("scroll", bump, true); window.removeEventListener("resize", bump); };
   }, []);
-  React.useEffect(() => { if (mode !== "link") setPending(null); }, [mode]);
+  React.useEffect(() => {
+    if (mode !== "link") setPending(null);
+    // [v0.27] 退出连线/擦除模式时清掉悬停反馈，并把卡片样式还原（绝不留存高亮污染）
+    if (mode !== "link") { restoreHover(); setHoverCard(null); setPointer(null); }
+    if (mode !== "erase") setHoverLink(null);
+  }, [mode]);
 
   const cardRect = (id) => {
     const el = document.querySelector(`[data-goal-id="${id}"]`);
@@ -1167,14 +1191,88 @@ function LinksLayer(props) {
     return side === "from" ? { x: rect.right, y: rect.top + rect.height / 2 } : { x: rect.left, y: rect.top + rect.height / 2 };
   };
 
+  // [v0.27] 悬停高亮：只临时改卡片的 outline/boxShadow，退出/移开/卸载立即按原值还原
+  // （函数声明而非 const 箭头：下面的 mode 副作用会引用它，避免任何前向引用/求值顺序问题）
+  function restoreHover() {
+    const cur = hoverElRef.current;
+    if (!cur) return;
+    try {
+      cur.el.style.boxShadow = cur.boxShadow;
+      cur.el.style.outline = cur.outline;
+      cur.el.style.outlineOffset = cur.outlineOffset;
+    } catch { /* 元素已卸载 */ }
+    hoverElRef.current = null;
+  }
+  function paintHover(el, kind) {
+    if (hoverElRef.current && hoverElRef.current.el !== el) restoreHover();
+    if (!el) { restoreHover(); return; }
+    if (!hoverElRef.current) {
+      hoverElRef.current = { el, boxShadow: el.style.boxShadow, outline: el.style.outline, outlineOffset: el.style.outlineOffset };
+    }
+    const color = (AP_LINK_KINDS[kind] ?? AP_LINK_KINDS.start).color;
+    try {
+      el.style.outline = "2px solid " + color;
+      el.style.outlineOffset = "2px";
+      el.style.boxShadow = "0 0 0 2px " + color + "aa, 0 0 18px " + color + "99";
+    } catch { /* 元素已卸载 */ }
+  }
+  // rAF 节流（无 requestAnimationFrame 的极早期环境退化为 ~16ms 定时器）
+  const raf = (cb) => (typeof requestAnimationFrame === "function" ? requestAnimationFrame(cb) : setTimeout(cb, 16));
+  const caf = (id) => { try { if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(id); } catch { /* ignore */ } try { clearTimeout(id); } catch { /* ignore */ } };
+  /** [v0.27] 坐标命中：捕获层盖在视口最上面（e.target 恒为自身）→ 只能用 elementsFromPoint 找卡片 */
+  const cardAt = (x, y) => {
+    try {
+      const stack = document.elementsFromPoint(x, y) || [];
+      return stack.find((n) => n?.getAttribute?.("data-goal-id")) ?? null;
+    } catch { return null; }
+  };
+  /** [v0.27] 连线模式：记录光标（rAF 节流）→ 命中卡片即高亮 + 锚点提示 + 预览线 */
+  const onLayerMove = (e) => {
+    ptrRef.current = { x: e.clientX, y: e.clientY };
+    if (rafRef.current) return;
+    rafRef.current = raf(() => {
+      rafRef.current = 0;
+      const p = ptrRef.current;
+      if (!p) return;
+      setPointer(p);
+      const el = cardAt(p.x, p.y);
+      if (!el) { setHoverCard(null); restoreHover(); return; }
+      const rect = el.getBoundingClientRect();
+      const rel = (p.y - rect.top) / Math.max(1, rect.height);
+      const kind = rel < 0.33 ? "start" : rel > 0.66 ? "end" : "mid";
+      setHoverCard({ id: el.getAttribute("data-goal-id"), kind });
+      paintHover(el, kind);
+    });
+  };
+  const onLayerLeave = () => {
+    setPointer(null);
+    setHoverCard(null);
+    restoreHover();
+  };
+  // [v0.27] 连线几何只在 links/tick 变化时重算（光标移动不再反复重测 DOM）
+  const paths = React.useMemo(() => {
+    const out = [];
+    for (const l of links) {
+      const a = anchor(cardRect(l.from), l.kind, "from");
+      const b = anchor(cardRect(l.to), l.kind, "to");
+      if (!a || !b) continue;
+      const c1 = { x: a.x, y: a.y + (l.kind === "start" ? -40 : l.kind === "end" ? 40 : 0) };
+      const c2 = { x: b.x, y: b.y + (l.kind === "start" ? 40 : l.kind === "end" ? -40 : 0) };
+      if (l.kind === "mid") { c1.x = a.x + 40; c2.x = b.x - 40; }
+      out.push({ ...l, a, b, d: `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`, color: AP_LINK_KINDS[l.kind].color });
+    }
+    return out;
+  }, [links, tick]);
+  // [v0.27] 卸载兜底：取消挂起的 rAF + 还原被高亮的卡片（不留样式污染）
+  React.useEffect(() => () => {
+    if (rafRef.current) caf(rafRef.current);
+    restoreHover();
+  }, []);
+
   const onClickCard = (e) => {
     if (mode === "idle") return;
     // ⚠️ 捕获层盖在整个视口上，e.target 永远是本层自身 → 必须用坐标命中测试找卡片
-    let el = null;
-    try {
-      const stack = document.elementsFromPoint(e.clientX, e.clientY) || [];
-      el = stack.find((n) => n?.getAttribute?.("data-goal-id"));
-    } catch { el = null; }
+    const el = cardAt(e.clientX, e.clientY);
     if (!el) {           // 空白处点击 = 取消已选起点（回到空闲也不退出模式）
       if (pending) { setPending(null); setMsg("已取消起点选择"); }
       return;
@@ -1212,6 +1310,7 @@ function LinksLayer(props) {
       .then(({ ok, d }) => {
         if (!ok) { setMsg("❌ " + (d?.error ?? "删除失败")); return; }
         setLinks(Array.isArray(d.links) ? d.links : []);
+        setHoverLink((cur) => (cur === id ? null : cur)); // [v0.27] 被删的线不能继续悬停
         setMsg("🧽 已擦除一条连线");
         window.dispatchEvent(new CustomEvent("autopilot:links-changed"));
       })
@@ -1220,16 +1319,25 @@ function LinksLayer(props) {
 
   if (!workspace) return null;
 
-  const paths = [];
-  for (const l of links) {
-    const a = anchor(cardRect(l.from), l.kind, "from");
-    const b = anchor(cardRect(l.to), l.kind, "to");
-    if (!a || !b) continue;
-    const c1 = { x: a.x, y: a.y + (l.kind === "start" ? -40 : l.kind === "end" ? 40 : 0) };
-    const c2 = { x: b.x, y: b.y + (l.kind === "start" ? 40 : l.kind === "end" ? -40 : 0) };
-    if (l.kind === "mid") { c1.x = a.x + 40; c2.x = b.x - 40; }
-    paths.push({ ...l, d: `M ${a.x} ${a.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`, color: AP_LINK_KINDS[l.kind].color });
-  }
+  // [v0.27] 悬停卡片的三个锚点提示（上=开始 / 中=协作 / 下=结束）
+  const hoverRect = hoverCard ? cardRect(hoverCard.id) : null;
+  // [v0.27] 预览线：已选起点 → 光标（悬停到卡片时吸附到该卡片对应锚点，明确「会连到哪个部位」）
+  const preview = (() => {
+    if (mode !== "link" || !pending || !pointer) return null;
+    const from = anchor(cardRect(pending.id), pending.kind, "from");
+    if (!from) return null;
+    const kind = AP_LINK_KINDS[pending.kind] ?? AP_LINK_KINDS.start;
+    let to = pointer;
+    let toKind = pending.kind;
+    if (hoverCard) {
+      const t = anchor(hoverRect, hoverCard.kind, "to");
+      if (t) { to = t; toKind = hoverCard.kind; }
+    }
+    const c1 = { x: from.x, y: from.y + (pending.kind === "start" ? -40 : pending.kind === "end" ? 40 : 0) };
+    const c2 = { x: to.x, y: to.y + (toKind === "start" ? 40 : toKind === "end" ? -40 : 0) };
+    if (pending.kind === "mid") { c1.x = from.x + 40; c2.x = to.x - 40; }
+    return { d: `M ${from.x} ${from.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${to.x} ${to.y}`, color: kind.color };
+  })();
 
   // [v0.26] 工具条：挂进看板头部工具行（.dg-head，与 刷新/标签筛选/记忆/项目知识库/已归档 同一行）
   const toolbarEl = h("div", {
@@ -1260,22 +1368,69 @@ function LinksLayer(props) {
           key: k, id: "ap-arrow-" + k, viewBox: "0 0 10 10", refX: 9, refY: 5,
           markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse",
         }, h("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: AP_LINK_KINDS[k].color })))),
-      paths.map((p) => h("path", {
-        key: p.id,
-        d: p.d,
-        stroke: p.color,
-        strokeWidth: mode === "erase" ? 3 : 2,
-        strokeDasharray: p.kind === "mid" ? "6 4" : undefined,
-        fill: "none",
-        markerEnd: `url(#ap-arrow-${p.kind})`,
-        style: { pointerEvents: mode === "erase" ? "stroke" : "none", cursor: mode === "erase" ? "pointer" : "default" },
-        onClick: mode === "erase" ? (e) => erase(p.id, e) : undefined,
-      }, h("title", null, `${AP_LINK_KINDS[p.kind].label}：${p.from} → ${p.to}${mode === "erase" ? "（点此擦除）" : ""}`))),
+      paths.map((p) => {
+        const hovered = mode === "erase" && hoverLink === p.id; // [v0.27] 橡皮擦悬停：加粗 + 变红
+        return h("path", {
+          key: p.id,
+          d: p.d,
+          stroke: hovered ? "#ff6b6b" : p.color,
+          strokeWidth: mode === "erase" ? (hovered ? 6 : 3) : 2,
+          strokeDasharray: p.kind === "mid" ? "6 4" : undefined,
+          strokeLinecap: "round",
+          fill: "none",
+          markerEnd: `url(#ap-arrow-${p.kind})`,
+          style: {
+            pointerEvents: mode === "erase" ? "stroke" : "none",
+            cursor: mode === "erase" ? "pointer" : "default",
+            filter: hovered ? "drop-shadow(0 0 4px #ff6b6b)" : undefined,
+          },
+          onClick: mode === "erase" ? (e) => erase(p.id, e) : undefined,
+          onMouseEnter: mode === "erase" ? () => setHoverLink(p.id) : undefined,
+          onMouseLeave: mode === "erase" ? () => setHoverLink((cur) => (cur === p.id ? null : cur)) : undefined,
+        }, h("title", null, `${AP_LINK_KINDS[p.kind].label}：${p.from} → ${p.to}${mode === "erase" ? "（点此擦除）" : ""}`));
+      }),
+      // [v0.27] 橡皮擦悬停时在中点给出「点我删除」提示
+      mode === "erase" && hoverLink && (() => {
+        const p = paths.find((x) => x.id === hoverLink);
+        if (!p) return null;
+        return h("text", {
+          x: (p.a.x + p.b.x) / 2, y: (p.a.y + p.b.y) / 2 - 10, textAnchor: "middle", fontSize: 11,
+          fill: "#ff6b6b", stroke: "rgba(0,0,0,.55)", strokeWidth: 3, paintOrder: "stroke",
+          style: { pointerEvents: "none" },
+        }, "点我删除");
+      })(),
+      // [v0.27] 预览线：已选起点 → 光标 / 吸附锚点（虚线，同色）
+      preview && h("path", {
+        d: preview.d, stroke: preview.color, strokeWidth: 2, strokeDasharray: "6 4", fill: "none",
+        opacity: 0.9, style: { pointerEvents: "none" },
+      }),
+      // [v0.27] 悬停卡片的三个锚点小圆点，并高亮「当前鼠标所在部位会选中的类型」
+      hoverCard && hoverRect && ["start", "mid", "end"].map((k) => {
+        const pt = anchor(hoverRect, k, pending ? "to" : "from");
+        if (!pt) return null;
+        const active = hoverCard.kind === k;
+        return h("circle", {
+          key: "ap-dot-" + k, cx: pt.x, cy: pt.y, r: active ? 6.5 : 4,
+          fill: active ? AP_LINK_KINDS[k].color : "rgba(20,22,27,.72)",
+          stroke: AP_LINK_KINDS[k].color, strokeWidth: active ? 2.5 : 1.5, opacity: active ? 1 : 0.75,
+          style: { pointerEvents: "none" },
+        });
+      }),
+      // [v0.27] 跟随光标显示当前会建立的连接类型
+      mode === "link" && hoverCard && pointer && h("text", {
+        x: pointer.x + 12, y: pointer.y - 10, fontSize: 11, fill: AP_LINK_KINDS[hoverCard.kind].color,
+        stroke: "rgba(0,0,0,.55)", strokeWidth: 3, paintOrder: "stroke",
+        style: { pointerEvents: "none" },
+      }, AP_LINK_KINDS[hoverCard.kind].label),
     ),
     // 点击捕获层：连线模式下拦下卡片点击（注意只吞掉落在卡片上的点击）
+    // [v0.27] 同时承载连线模式的悬停反馈（光标位置 → 卡片高亮/锚点/预览线）；擦除模式保持
+    // pointerEvents:none（不遮挡连线点击），其悬停提示由每条连线自身的 onMouseEnter/Leave 提供。
     mode === "idle" ? null : h("div", {
       style: { position: "absolute", inset: 0, pointerEvents: mode === "erase" ? "none" : "auto", cursor: "crosshair" },
       onClick: onClickCard,
+      onMouseMove: mode === "link" ? onLayerMove : undefined,
+      onMouseLeave: mode === "link" ? onLayerLeave : undefined,
     }),
     // 工具条：**放进看板自身的头部工具行**（.dg-head，与 刷新/标签筛选/记忆/项目知识库/已归档 同一行），
     // 用 ReactDOM.createPortal 挂进去；极早期（头部还没渲染）时退化为层内展示。

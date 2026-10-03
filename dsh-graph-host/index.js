@@ -44,6 +44,7 @@ import {
   generateHandoff,
   claimSupervisor,
   bindAttemptChild,
+  readGoalBinding,
   moveGoal,
   amendGoal,
   renameGoal,
@@ -192,6 +193,8 @@ import {
   setLanePrompt,
   lanePromptFor,
   restoreGoalToDraft,
+  // [v0.27] 问题 22：带附件目标强制回草稿（目录形态保留 cards/attempts）
+  moveGoalToDraftForce,
   listBlockedGoals,
   listRegistry,
   setCriteriaChecked,
@@ -203,6 +206,8 @@ import {
   ensureGroups,
   listGroups,
   isDefaultGroup,
+  // [v0.27] 问题 13：自建常驻分组（workspace / global 两级定义 + 物化）
+  createGroup,
   laneModelFor,
   listStacks,
   stackTrashItems,
@@ -3182,6 +3187,61 @@ export function apply(ctx, config) {
         }
       },
     },
+    // [v0.27] 问题 22：移回草稿（暂存）——普通路径优先；force=true 时允许带 cards/attempts 附件的目标
+    // 以目录形态（backlog/<id>/goal.md）落入草稿，并在迁移前尽力停掉该目标在跑的子代理。
+    {
+      path: "/api/dsh-graph/move-to-draft",
+      handler: async (req, res) => {
+        try {
+          if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+          const body = await readBody(req);
+          const goal = String(body.goal ?? "").trim();
+          if (!goal) return json(res, 400, { error: "missing goal" });
+          const root = rootForReq(req, body);
+          // ① 普通路径：无附件/无绑定/无子代理时与旧行为完全一致（失败原样返回可操作错误码）
+          try {
+            moveGoal(root, goal, { to: "backlog", actor: "human:gui" });
+            return json(res, 200, { ok: true, mode: "normal" });
+          } catch (normalErr) {
+            if (body.force !== true) {
+              const message = String(normalErr?.message ?? normalErr);
+              const errCode = /附件/.test(message) && /backlog/i.test(message) ? "move-to-backlog-has-attachments" : null;
+              return json(res, normalErr instanceof GraphError ? 400 : 500, errCode ? { error: message, code: errCode } : { error: message });
+            }
+          }
+          // ② force 路径：先尽力停掉该目标在跑的子代理（拿不到 child id 就跳过并记事件，不阻塞迁移）
+          let childId = null;
+          let stopNote = "no-binding";
+          try {
+            const binding = readGoalBinding(root, goal);
+            if (binding?.child_id) {
+              childId = binding.child_id;
+              const parentSessionId = binding.parent_session_id ?? null;
+              const subs = ctx.get?.("subagents");
+              if (subs && typeof subs.interruptByParent === "function" && parentSessionId) {
+                subs.interruptByParent(childId, parentSessionId, "continuable");
+                stopNote = "interrupted";
+              } else {
+                stopNote = "interrupt-unavailable";
+              }
+            }
+          } catch (e) {
+            stopNote = `binding-read-failed: ${String(e?.message ?? e)}`;
+          }
+          appendEvent(root, {
+            actor: "human:gui",
+            event: "autopilot.move_to_draft_forced",
+            goal,
+            details: { child_id: childId, stop: stopNote },
+          });
+          const out = moveGoalToDraftForce(root, goal, { actor: "human:gui" });
+          json(res, 200, { ok: true, mode: "force", child_id: childId, stop: stopNote, file: out.file });
+        } catch (e) {
+          const code = e instanceof GraphError ? 400 : 500;
+          json(res, code, { error: String(e?.message ?? e) });
+        }
+      },
+    },
     {
       path: "/api/dsh-graph/edit-description",
       handler: async (req, res) => {
@@ -4139,11 +4199,46 @@ export function apply(ctx, config) {
             return json(res, 400, { error: `「${slug.trim()}」是固定分组，与独立目标同属性，不可删除` });
           }
           const r = rootForReq(req, body);
+          // [v0.27] 问题 13：自建分组（autopilot-groups.json / 全局 group-defs.json）同样受删除保护
+          if (isProtectedVersion(slug, { root: r })) {
+            return json(res, 400, { error: `「${slug.trim()}」是常驻分组（自建），与独立目标同属性，不可删除` });
+          }
           const result = deleteVersion(r, { slug: slug.trim(), actor: "human:gui" });
           json(res, 200, { ok: true, ...result });
         } catch (e) {
           const code = e instanceof GraphError ? 400 : 500;
           json(res, code, { error: String(e?.message ?? e) });
+        }
+      },
+    },
+    // [v0.27] 问题 13：自建常驻分组 —— 列出（GET/POST 读）与创建（POST 写，workspace/global 两级）
+    {
+      path: "/api/dsh-graph/groups",
+      handler: async (req, res) => {
+        try {
+          const body = req.method === "POST" ? await readBody(req) : {};
+          const r = rootForReq(req, body);
+          try { ensureGroups(r); } catch { /* 自愈失败不影响列表 */ }
+          json(res, 200, { ok: true, groups: listGroups(r) });
+        } catch (e) {
+          json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) });
+        }
+      },
+    },
+    {
+      path: "/api/dsh-graph/create-group",
+      handler: async (req, res) => {
+        try {
+          if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+          const body = await readBody(req);
+          const name = String(body.name ?? "").trim();
+          if (!name) return json(res, 400, { error: "missing name" });
+          const scope = body.scope === "global" ? "global" : "workspace";
+          const r = rootForReq(req, body);
+          const out = createGroup(r, { name, scope, prompt: body.prompt ?? null }, "human:gui");
+          json(res, 200, { ok: true, slug: out.slug, name: out.name, scope: out.scope, groups: listGroups(r) });
+        } catch (e) {
+          json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) });
         }
       },
     },
@@ -4563,6 +4658,20 @@ export function apply(ctx, config) {
         const lp = lanePromptFor(root, laneKey);
         if (lp) briefParts.push(`【本泳道职责（负责人设定，必须对齐）】\n${lp}`);
       } catch { /* 提示词缺失不阻断派发 */ }
+      // [v0.27] 问题 10：draft/planning 阶段先做初步规划 + 工作区材料收集，规划完成后再进入实现
+      try {
+        const phase = String(doc?.meta?.status ?? "");
+        if (phase === "draft" || phase === "planning") {
+          briefParts.push([
+            `【本目标处于${phase === "draft" ? "草稿" : "规划"}阶段：先做初步规划与材料收集，再进入实现】`,
+            "开工顺序（务必遵守）：",
+            "1. 初步规划：把目标拆解为可执行步骤，列出所需材料与依赖（缺什么资料、依赖哪些文件/命令/外部条件），并写清验收路径；",
+            "2. 收集工作区材料：读 README 等正式文档、构建与配置文件（如 package.json / 构建脚本）、与目标相关的源码、近期提交（git log / git status），把关键发现（现状、约束、坑、可复用点）整理成简明清单；",
+            "3. 落盘：把「初步规划」与「材料收集结论」写入目标描述（graph_amend_goal 的 appendDescription）或上下文卡片（graph_add_card）；若当前模式未开放这两个工具，就写入工作区内的规划文档（如 PLAN.md）并在收尾报告里给出摘要；",
+            "4. 规划完成后才开始改代码/产出物；若发现目标不可行或需要负责人决策，按流程置 blocked 并写明原因与所需决策。",
+          ].join("\n"));
+        }
+      } catch { /* 状态读取失败不阻断派发 */ }
       // [v0.20] 记忆插件（dsh-memory-evolve）用全局 systemPrompt 上下文注入 + 全局工具注册，
       // 子代理会话吃得到。这里显式提醒，避免执行子代理忽略系统提示里的记忆快照。
       briefParts.push("【记忆】你的系统提示里若包含「记忆快照 / 长期记忆」段落，必须遵循其中的约束与偏好；若提供记忆类工具（de_* / memory_*），开工前先读取与本任务相关的条目。");
@@ -4632,7 +4741,10 @@ export function apply(ctx, config) {
 
     function autopilotStart(root, version, reviewMode, actor) {
       if (autopilotRunners.has(root)) throw new GraphError("该工作区已有执行中的泳道——先 autopilot_stop 再重新开始");
-      const plan = laneReadiness(root, version);
+      // [v0.27] 问题 9 收尾：把「子代理是否还活着」接进 readiness 判定——DSH 重启后 attempt 子代理已死，
+      // childLiveState 返回 "gone" 时不再以「已在执行中」阻断，自动恢复（autopilot-runner.json）才走得通。
+      // 其余状态（running/idle/unknown）一律保守按仍 live 处理。
+      const plan = laneReadiness(root, version, { isLive: (cid) => childLiveState(cid) !== "gone" });
       if (!plan.runnable.length) {
         throw new GraphError(`泳道 ${version} 没有可派发目标。阻断明细：${plan.goals.filter((g) => g.blockers.length).map((g) => `${g.id}(${g.blockers.join("；")})`).join(" / ") || "无目标"}`);
       }
@@ -4822,8 +4934,9 @@ export function apply(ctx, config) {
         parameters: params({
           action: {
             type: "string",
-            description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|catalog_list|status",
+            description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|catalog_list|settings_get|settings_set|status",
           },
+          settings: { type: "object", description: "[v0.27] settings_set 的设置对象（看板设置）：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels。profile 级设置（subagentProvider/subagentModel/subagentMode/subagentReasoningEffort/subagentPrompt/promptLanguage）由 DSH 设置页写入，本 action 不写并会在 skipped 里说明。" },
           lane: { type: "string", description: "泳道键（版本 slug / standalone / backlog / *）" },
           text: { type: "string", description: "文本（提示词 / 协作消息 / 全局目标 / 全局提示词）" },
           goal: { type: "string" }, dir: { type: "string" }, version: { type: "string" },
@@ -4897,6 +5010,86 @@ export function apply(ctx, config) {
               const prompt = buildManagerPrompt(root, ws);
               void spawnChild("graph:rec-manager", prompt, { on: () => {} }, root, { role: "pm" });
               return { ok: true, started: true };
+            }
+            // [v0.27] 问题 21：设置对主对话完全开放 —— 读：看板(profile)设置 + autopilot 状态一次读全
+            case "settings_get":
+              return {
+                ok: true,
+                settings: readGraphSettings(),
+                settings_source: graphSettingsScope ? "settings-service" : "defaults",
+                state: readAutopilotState(root),
+              };
+            // [v0.27] 问题 21：写看板设置（autopilot.json，与 GUI 设置面板同源）。
+            // 可写字段（能在本文件确认写入路径的）：globalPrompt/globalGoal/autoPreset/reviewMode/
+            // managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels；
+            // profile 级设置（subagent*/promptLanguage）本插件只有读取能力，不写进 skipped 里如实说明。
+            case "settings_set": {
+              let src = (a.settings && typeof a.settings === "object" && !Array.isArray(a.settings)) ? { ...a.settings } : {};
+              if (!Object.keys(src).length) {
+                // 兼容：未传 settings 对象时，退用工具已有的顶层参数（与 manager_set 同源的字段）
+                for (const k of ["reviewMode", "managerPrompt", "managerEnabled", "managerIntervalMin", "managerUpdateGlobals"]) {
+                  if (a[k] !== undefined && a[k] !== null) src[k] = a[k];
+                }
+              }
+              const has = (k) => Object.prototype.hasOwnProperty.call(src, k);
+              const patch = {};
+              const written = [];
+              const skipped = [];
+              if (has("globalPrompt") && (typeof src.globalPrompt === "string" || src.globalPrompt === null)) {
+                patch.globalPrompt = src.globalPrompt === null ? null : String(src.globalPrompt).trim() || null;
+                written.push("globalPrompt");
+              }
+              if (has("globalGoal") && (typeof src.globalGoal === "string" || src.globalGoal === null)) {
+                const t = src.globalGoal === null ? "" : String(src.globalGoal).trim();
+                patch.globalGoal = t ? { text: t, updatedAt: new Date().toISOString() } : null;
+                written.push("globalGoal");
+              }
+              if (has("autoPreset") && typeof src.autoPreset === "boolean") { patch.autoPreset = src.autoPreset; written.push("autoPreset"); }
+              if (has("reviewMode") && (src.reviewMode === "auto" || src.reviewMode === "human")) { patch.reviewMode = src.reviewMode; written.push("reviewMode"); }
+              if (has("managerPrompt") && (typeof src.managerPrompt === "string" || src.managerPrompt === null)) { patch.managerPrompt = src.managerPrompt; written.push("managerPrompt"); }
+              if (has("managerEnabled") && typeof src.managerEnabled === "boolean") { patch.managerEnabled = src.managerEnabled; written.push("managerEnabled"); }
+              if (has("managerIntervalMin") && Number.isFinite(Number(src.managerIntervalMin))) {
+                patch.managerIntervalMin = Math.max(1, Math.min(24 * 60, Math.round(Number(src.managerIntervalMin))));
+                written.push("managerIntervalMin");
+              }
+              if (has("managerUpdateGlobals") && typeof src.managerUpdateGlobals === "boolean") { patch.managerUpdateGlobals = src.managerUpdateGlobals; written.push("managerUpdateGlobals"); }
+              if (has("lanePrompts") && src.lanePrompts && typeof src.lanePrompts === "object" && !Array.isArray(src.lanePrompts)) {
+                const next = { ...(readAutopilotState(root).lanePrompts ?? {}) };
+                for (const [k, v] of Object.entries(src.lanePrompts)) {
+                  if (!k || String(k).length > 80) continue;
+                  const t = v === null ? "" : String(v ?? "").trim();
+                  if (t) next[k] = t.slice(0, 4000); else delete next[k];
+                }
+                patch.lanePrompts = next;
+                written.push("lanePrompts");
+              }
+              if (has("laneModels") && src.laneModels && typeof src.laneModels === "object" && !Array.isArray(src.laneModels)) {
+                const clean = {};
+                for (const [k, v] of Object.entries(src.laneModels)) {
+                  if (!k || k.length > 80) continue;
+                  if (v === null) { clean[k] = null; continue; }
+                  if (!v || typeof v !== "object") continue;
+                  clean[k] = {
+                    provider: v.provider ? String(v.provider).slice(0, 80) : null,
+                    model: v.model ? String(v.model).slice(0, 120) : null,
+                    reasoning_effort: v.reasoning_effort ? String(v.reasoning_effort).slice(0, 24) : null,
+                  };
+                }
+                patch.laneModels = clean;
+                written.push("laneModels");
+              }
+              for (const k of ["subagentProvider", "subagentModel", "subagentMode", "subagentReasoningEffort", "subagentPrompt", "promptLanguage"]) {
+                if (has(k)) skipped.push(`${k}（profile 级设置，本 action 不写；请在 DSH 设置页修改）`);
+              }
+              if (!written.length) {
+                return {
+                  ok: false,
+                  error: `settings_set 未写入任何字段。可写字段：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels；skipped：${skipped.join("；") || "无"}`,
+                  skipped,
+                };
+              }
+              const st2 = writeAutopilotState(root, patch, { actor: autopilotActor(ex) });
+              return { ok: true, written, skipped, state: st2, settings: readGraphSettings() };
             }
             case "links_list": return { ok: true, links: listLinks(root, a.goal ?? null) };
             case "links_add": return { ok: true, ...addLink(root, { from: String(a.from ?? ""), to: String(a.to ?? ""), kind: a.kind, note: a.note ?? null }, autopilotActor(ex)) };

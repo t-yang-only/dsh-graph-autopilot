@@ -110,6 +110,65 @@
       const [intervalWarn, setIntervalWarn] = React.useState(null);
       // g-224：实时代理输出流式显示开关（localStorage 持久化，即时生效）
       const liveDisplayOn = useLiveDisplayEnabled();
+      // ===== [v0.27] 问题 15/16/23：评审模式 + ⚙ 高级（无提示模式 / 按泳道选模型）=====
+      // 全部读写 /api/dsh-graph-autopilot/manager 端点（原在自动驾驶面板里的同一份设置，
+      // 面板侧由另一个代理移除）。选中即保存；workspace 由 kanban.js 经 props.workspace 传入。
+      const [mgr, setMgr] = React.useState(null);
+      const [mgrBusy, setMgrBusy] = React.useState(false);
+      const [mgrNote, setMgrNote] = React.useState(null); // {kind:"ok"|"err", text}
+      const [laneDraft, setLaneDraft] = React.useState({}); // [v0.27] 按泳道选模型的草稿（原在自动驾驶面板，迁移至此）
+      // 无提示模式（与自动驾驶面板共用存储键与开关函数；typeof 守卫：单测沙箱里 autopilot 模块未加载）
+      const [noHints, setNoHints] = React.useState(() => (typeof apNoHintsOn === "function" ? apNoHintsOn() : false));
+      // 泳道 key → 中文标签（默认/部署测试/交互/后端/独立目标/草稿）
+      const AP_LANE_LABELS = { "*": "默认", "deploy-test": "部署测试", "interaction": "交互", "backend": "后端", "standalone": "独立目标", "backlog": "草稿" };
+      const AP_LANE_KEYS = ["*", "deploy-test", "interaction", "backend", "standalone", "backlog"];
+      // 新控件的显式配色（本机主题下 var(--dsw-alias-*) 会解析成白色 ⇒ 白底白字，故不使用主题变量；
+      // 深色值刻意避开 g-176 契约禁止的 #2a2b31 字面量，改用同一深色系的 #20222a）
+      const DG_AP_INPUT_STYLE = { background: "#20222a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, padding: "2px 6px", fontSize: 12, boxSizing: "border-box", minWidth: 0 };
+      const DG_AP_OPTION_STYLE = { background: "#20222a", color: "#e6e6e6" };
+      const mgrSet = (patch) => {
+        if (!props?.workspace) { setMgrNote({ kind: "err", text: "未确定工作区，无法保存评审/泳道模型设置" }); return Promise.resolve(null); }
+        setMgrBusy(true); setMgrNote(null);
+        return fetch("/api/dsh-graph-autopilot/manager", {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspace: props.workspace, action: "set", ...patch }),
+        })
+          .then((r) => r.json().then((d) => ({ ok: r.ok, d })).catch(() => ({ ok: r.ok, d: {} })))
+          .then(({ ok, d }) => {
+            if (!ok || !d?.ok) { setMgrNote({ kind: "err", text: "保存失败：" + (d?.error ?? "未知错误") }); return d; }
+            setMgr((m) => ({ ...(m ?? {}), ...d }));
+            setMgrNote({ kind: "ok", text: "✅ 已保存" });
+            return d;
+          })
+          .catch((e) => { setMgrNote({ kind: "err", text: "保存失败：" + String(e?.message ?? e) }); return null; })
+          .finally(() => setMgrBusy(false));
+      };
+      // [v0.27] 打开弹窗时读取 manager 现状（reviewMode / laneModels 等）；工作区变化时重读
+      React.useEffect(() => {
+        if (!props?.workspace) return undefined;
+        let alive = true;
+        fetch("/api/dsh-graph-autopilot/manager", {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspace: props.workspace, action: "get" }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => { if (alive && d?.ok) setMgr(d); })
+          .catch(() => {});
+        return () => { alive = false; };
+      }, [props?.workspace]);
+      // 保存泳道模型：留空（provider 与 model 都空）= 沿用全局 executor 配置（从 laneModels 中删除该泳道键）
+      const saveLaneModels = () => {
+        const next = { ...(mgr?.laneModels ?? {}) };
+        for (const [lane, v] of Object.entries(laneDraft)) {
+          const provider = String(v?.provider ?? "").trim();
+          const model = String(v?.model ?? "").trim();
+          if (!provider && !model) delete next[lane];
+          else next[lane] = { provider: provider || null, model: model || null, reasoning_effort: v?.reasoning_effort ?? null };
+        }
+        mgrSet({ laneModels: next }).then((d) => { if (d?.ok) setLaneDraft({}); });
+      };
 
       // g-246：打开时以服务端下发快照为基线（含刷新间隔初始值），关闭前深比较草稿判定脏
       const baselineRef = React.useRef(null);
@@ -431,6 +490,72 @@
             }),
             h("label", { htmlFor: "dg-live-display", style: { fontWeight: 700, fontSize: 12, flexShrink: 0, cursor: "pointer" } }, dgT("settings.liveDisplay")),
             h("span", { style: { ...S.meta, fontSize: 11, opacity: 0.7 } }, dgT("settings.liveDisabledHint"))),
+
+          // ===== [v0.27] 问题 15：评审模式（选中即保存到 autopilot manager 端点）=====
+          // 默认机审：机器门禁通过即自动裁决；人审：停在「确认」列等负责人裁决。
+          // i18n-keep(category-a)：本段标题/下拉选项文案按要求直接使用中文
+          h("hr", { style: { border: "none", borderTop: "1px solid rgba(128,128,128,.25)", margin: "10px 0" } }),
+          h("div", { style: { minWidth: 0 } },
+            h("div", { style: { fontWeight: 700, fontSize: 12, marginBottom: 4 } }, "评审模式"),
+            h("div", { style: { display: "flex", alignItems: "center", gap: 8, minWidth: 0, flexWrap: "wrap" } },
+              h("select", {
+                "aria-label": "评审模式",
+                style: { ...DG_AP_INPUT_STYLE, width: 190, flex: "0 0 auto" },
+                value: mgr?.reviewMode ?? "auto",
+                disabled: mgrBusy || !props?.workspace || !mgr,
+                onChange: (e) => mgrSet({ reviewMode: e.target.value }),
+              },
+                // i18n-keep(category-a)：下拉选项「机审（默认）/人审」为中文
+                h("option", { value: "auto", style: DG_AP_OPTION_STYLE }, "机审（默认）"),
+                h("option", { value: "human", style: DG_AP_OPTION_STYLE }, "人审")),
+              mgrNote ? h("span", { style: { fontSize: 11, color: mgrNote.kind === "ok" ? "#6ee7a0" : "#ff8a8a" } }, mgrNote.text) : null),
+            // i18n-keep(category-a)：评审模式说明与读取状态提示为中文
+            h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, marginTop: 3 } },
+              "机审 = 机器门禁通过即自动裁决；人审 = 停在「确认」列等负责人裁决。选中即保存。"),
+            !mgr ? h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, marginTop: 2 } },
+              props?.workspace ? "正在读取评审模式/泳道模型…（读取失败时显示为空，可直接编辑后保存覆盖）" : "未确定工作区，无法读取/保存评审模式与泳道模型。") : null),
+
+          // ===== [v0.27] 问题 16/23：⚙ 高级（无提示模式 + 按泳道选模型）=====
+          // i18n-keep(category-a)：本段标题/复选框文案/泳道标签为中文
+          h("div", { style: { marginTop: 10, minWidth: 0 } },
+            h("div", { style: { fontWeight: 700, fontSize: 12, marginBottom: 4 } }, "⚙ 高级"),
+            h("label", { style: { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer" } },
+              h("input", { type: "checkbox", checked: noHints, onChange: (e) => { setNoHints(e.target.checked); if (typeof apApplyNoHints === "function") apApplyNoHints(e.target.checked); } }),
+              "无提示模式（一键隐藏所有帮助说明）"),
+            h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, marginTop: 2, marginBottom: 6 } },
+              "开启后隐藏看板与面板里所有 .dg-hint 帮助文字，界面更紧凑。"),
+            h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4, flexWrap: "wrap" } },
+              h("span", { style: { fontSize: 12, fontWeight: 600 } }, "按泳道选模型"),
+              h("span", { style: { fontSize: 11, opacity: 0.7 } }, "留空 = 沿用全局 executor 配置")),
+            h("div", { style: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6 } },
+              ...AP_LANE_KEYS.map((lane) => {
+                const cur = (mgr?.laneModels ?? {})[lane] ?? {};
+                return h("div", { key: "lm-" + lane, style: { minWidth: 0, border: "1px solid rgba(128,128,128,.25)", borderRadius: 6, padding: "4px 6px" } },
+                  h("div", { style: { fontSize: 11, opacity: 0.85, marginBottom: 2 } }, AP_LANE_LABELS[lane] ?? lane),
+                  h("div", { style: { display: "flex", gap: 4, minWidth: 0 } },
+                    h("input", {
+                      style: { ...DG_AP_INPUT_STYLE, flex: "1 1 0" },
+                      placeholder: "provider",
+                      value: laneDraft[lane]?.provider ?? cur.provider ?? "",
+                      onChange: (e) => setLaneDraft((p) => ({ ...p, [lane]: { ...(p[lane] ?? {}), provider: e.target.value, model: p[lane]?.model ?? cur.model ?? "" } })),
+                    }),
+                    h("input", {
+                      style: { ...DG_AP_INPUT_STYLE, flex: "1 1 0" },
+                      placeholder: "model",
+                      value: laneDraft[lane]?.model ?? cur.model ?? "",
+                      onChange: (e) => setLaneDraft((p) => ({ ...p, [lane]: { ...(p[lane] ?? {}), model: e.target.value, provider: p[lane]?.provider ?? cur.provider ?? "" } })),
+                    })));
+              })),
+            h("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" } },
+              // i18n-keep(category-a)：保存按钮与工作区缺失提示为中文
+              h("button", {
+                className: "dg-btn",
+                style: { borderRadius: 6, padding: "3px 10px", fontSize: 12, cursor: "pointer", border: "1px solid #3b7ddd", background: "#3b7ddd", color: "#fff", whiteSpace: "nowrap" },
+                disabled: mgrBusy || !props?.workspace,
+                title: "保存每条泳道的执行子代理模型（留空=沿用全局 executor 配置）",
+                onClick: saveLaneModels,
+              }, mgrBusy ? "…" : "保存泳道模型"),
+              !props?.workspace ? h("span", { style: { fontSize: 11, color: "#ff8a8a" } }, "未确定工作区，暂不可配置") : null)),
 
           h("hr", { style: { border: "none", borderTop: "1px solid rgba(128,128,128,.25)", margin: "10px 0" } }),
 
