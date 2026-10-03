@@ -2635,11 +2635,12 @@
           // g-352：窄档下标题不内部折行（nowrap + min-width:auto ⇒ 保持自然宽度，由头部换行让位）
           h("strong", { style: narrowActive ? { whiteSpace: "nowrap", flexShrink: 0 } : undefined }, "dsh-graph"),
           // g-174：标题栏显示插件版本，点击以新标签打开插件官网
+          // [v0.19] 版本号点击跳转改为**本机 fork 分支**（负责人私有仓；原上游链接保留在 README）
           h("a", {
-            href: "https://github.com/miuzel/dsh-graph",
+            href: "https://github.com/t-yang-only/dsh-graph-autopilot/tree/autopilot",
             target: "_blank",
             rel: "noreferrer",
-            title: "dsh-graph",
+            title: "dsh-graph-autopilot（autopilot 分支）",
             style: { ...S.meta, color: "var(--dsw-alias-state-business-primary, #8ab4ff)", cursor: "pointer", textDecoration: "underline", ...(narrowActive ? { whiteSpace: "nowrap", flexShrink: 0 } : {}) },
           }, "version: " + PLUGIN_VERSION),
           // g-214：局部化倒计时组件渲染数据更新时间及剩余秒数倒计时

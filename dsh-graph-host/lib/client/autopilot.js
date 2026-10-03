@@ -88,6 +88,11 @@ function AutopilotPanel(props) {
   // [v0.18] 推荐管理员 + 协作频道
   const [mgr, setMgr] = React.useState(null);
   const [mgrPrompt, setMgrPrompt] = React.useState("");
+  const [recHint, setRecHint] = React.useState(""); // [v0.19] 按输入内容推荐
+  const [laneSel, setLaneSel] = React.useState("");
+  const [laneText, setLaneText] = React.useState("");
+  const [lanePrompts, setLanePrompts] = React.useState({});
+  const [laneOpen, setLaneOpen] = React.useState(false);
   const [mgrOpen, setMgrOpen] = React.useState(false);
   const [collab, setCollab] = React.useState({ messages: [], claims: [] });
   const [collabOpen, setCollabOpen] = React.useState(false);
@@ -128,6 +133,14 @@ function AutopilotPanel(props) {
         setMgr(d);
         setMgrPrompt(d.managerPrompt ?? d.defaultPrompt ?? "");
       })
+      .catch(() => {});
+    fetch("/api/dsh-graph-autopilot/manager", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "lane-prompt-get" }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.ok) setLanePrompts(d.lanePrompts ?? {}); })
       .catch(() => {});
     fetch("/api/dsh-graph-autopilot/collab", {
       method: "POST", credentials: "same-origin",
@@ -190,10 +203,10 @@ function AutopilotPanel(props) {
       .finally(() => setBusy(""));
   };
 
-  const btn = { borderRadius: 6, padding: "3px 9px", fontSize: 12, cursor: "pointer", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.12))", color: "inherit", whiteSpace: "nowrap" };
-  const btnPrimary = { ...btn, background: "var(--dsw-alias-button-primary-fill, rgba(76,141,255,.9))", color: "#fff", borderColor: "transparent" };
-  const chip = { fontSize: 11, borderRadius: 5, padding: "1px 6px", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.15))", color: "var(--dsw-alias-label-secondary, inherit)" };
-  const input = { flex: 1, minWidth: 160, borderRadius: 6, border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "transparent", color: "inherit", padding: "3px 8px", fontSize: 12 };
+  const btn = { borderRadius: 6, padding: "3px 9px", fontSize: 12, cursor: "pointer", border: "1px solid rgba(140,145,155,.55)", background: "rgba(120,125,135,.30)", color: "inherit", whiteSpace: "nowrap" };
+  const btnPrimary = { ...btn, background: "#3b7ddd", borderColor: "#3b7ddd", color: "#fff" };
+  const chip = { fontSize: 11, borderRadius: 5, padding: "1px 6px", background: "rgba(120,125,135,.28)", color: "inherit" };
+  const input = { flex: 1, minWidth: 160, borderRadius: 6, border: "1px solid rgba(140,145,155,.5)", background: "rgba(20,22,27,.55)", color: "inherit", padding: "3px 8px", fontSize: 12 };
   const runner = st?.runner ?? null;
   const recs = st?.recommendations ?? [];
   const pickedIdxs = Object.keys(picked).filter((k) => picked[k]).map(Number);
@@ -211,8 +224,22 @@ function AutopilotPanel(props) {
       h("button", {
         style: btn, disabled: !!busy,
         title: "完整扫描：拉一个子代理深度分析工作区与项目正式文件（README/构建配置/提交历史等），再由 AI 回写推荐清单",
-        onClick: () => post("deep-scan", {}).then((d) => { if (d?.ok) setMsg("🔍 完整扫描已启动（子代理 " + (d.child_id ?? "") + "），完成后推荐清单会自动更新"); return load(); }),
+        onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) setMsg("🔍 完整扫描已启动（子代理 " + (d.child_id ?? "") + "），完成后推荐清单会自动更新"); return load(); }),
       }, busy === "deep-scan" ? "启动中…" : "🔍 完整扫描"),
+      // [v0.19] 按输入内容做推荐（走完整扫描，把输入作为本次推荐方向）
+      h("input", {
+        style: { ...input, minWidth: 200, flex: "1 1 200px" },
+        placeholder: "输入推荐方向（如：把部署脚本补齐 / 修掉登录超时）→ 按它推荐",
+        value: recHint,
+        onChange: (e) => setRecHint(e.target.value),
+        onKeyDown: (e) => { if (e.key === "Enter" && recHint.trim()) post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) setMsg("🔍 已按输入启动推荐扫描"); return load(); }); },
+      }),
+      h("button", {
+        style: { ...btn, background: recHint.trim() ? "#3b7ddd" : undefined, borderColor: recHint.trim() ? "#3b7ddd" : undefined, color: recHint.trim() ? "#fff" : "inherit" },
+        disabled: !!busy || !recHint.trim(),
+        title: "按你输入的内容生成推荐（把输入作为本次推荐方向，交给 AI 深度扫描）",
+        onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) { setMsg("🔍 已按输入启动推荐扫描"); setRecHint(""); } return load(); }),
+      }, "按输入推荐"),
       h("span", { style: chip }, recs.length + " 条"),
       h("span", { style: { opacity: 0.65 } }, "把卡片拖到任意泳道即可建目标执行；或勾选后批量采纳"),
       pickedIdxs.length > 0 && h("button", { style: btn, disabled: !!busy, onClick: () => post("adopt", { picks: pickedIdxs, version: null }).then(() => { setPicked({}); load(); }) }, "采纳所选 → backlog"),
@@ -347,6 +374,42 @@ function AutopilotPanel(props) {
         h("button", { style: btn, onClick: () => setMgrPrompt(mgr?.defaultPrompt ?? "") }, "载入内置默认"),
       ),
     ),
+    // —— [v0.19] 泳道职责提示词（每条泳道/固定分组可单独设置，派发时告知执行子代理）——
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+      h("strong", { style: { flexShrink: 0 } }, "🏷 泳道职责"),
+      h("select", {
+        style: { ...input, flex: "0 0 auto", minWidth: 150 },
+        value: laneSel,
+        onChange: (e) => { const v = e.target.value; setLaneSel(v); setLaneText(lanePrompts[v] ?? ""); setLaneOpen(true); },
+      },
+        h("option", { value: "" }, "选择泳道…"),
+        versions.map((v) => h("option", { key: "v-" + v, value: v }, "🏷️ " + v)),
+        h("option", { value: "standalone" }, "独立目标"),
+        h("option", { value: "backlog" }, "草稿"),
+        h("option", { value: "*" }, "全部泳道（通配）"),
+      ),
+      laneSel && h("span", { style: chip }, lanePrompts[laneSel] ? "已设置" : "未设置"),
+      h("span", { style: { opacity: 0.6, fontSize: 11 } }, "告诉 AI 这条泳道是干什么的（如：后端=服务端接口与数据；部署测试=发版与冒烟）"),
+      laneSel && h("button", { style: btn, onClick: () => setLaneOpen(!laneOpen) }, laneOpen ? "收起" : "编辑提示词"),
+    ),
+    laneOpen && laneSel && h("div", { style: { display: "flex", flexDirection: "column", gap: 4, padding: "0 0 0 14px" } },
+      h("textarea", {
+        style: { ...input, minWidth: 0, height: 64, resize: "vertical", fontFamily: "inherit" },
+        value: laneText,
+        placeholder: "例如：本泳道负责服务端接口与数据层；改动需同时给出接口签名与兼容性说明。留空保存=清除。",
+        onChange: (e) => setLaneText(e.target.value),
+      }),
+      h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+        h("button", {
+          style: btnPrimary, disabled: !!busy,
+          onClick: () => post("manager", { action: "lane-prompt-set", lane: laneSel, text: laneText }).then((d) => {
+            if (d?.ok) { setLanePrompts(d.lanePrompts ?? {}); setMsg("✅ 已保存泳道职责：" + laneSel); }
+            return load();
+          }),
+        }, "保存泳道职责"),
+        h("span", { style: { opacity: 0.6, fontSize: 11 } }, "派发该泳道任务时会注入这条提示词"),
+      ),
+    ),
     // —— [v0.18] 协作频道（任务间沟通 + 资源占用，防冲突）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "💬 协作"),
@@ -373,7 +436,11 @@ function AutopilotPanel(props) {
 // ---------------------------------------------------------------------------
 // 底部行共用外壳：**可折叠（默认折叠，不占位置）** + **实时刷新**（⟳ 手动 + 展开时每 10s 轮询）
 // ---------------------------------------------------------------------------
-const AP_ROW_BTN = { borderRadius: 6, padding: "2px 8px", fontSize: 11, cursor: "pointer", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.12))", color: "inherit", whiteSpace: "nowrap" };const AP_ROW_CHIP = { fontSize: 11, borderRadius: 5, padding: "0 6px", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.15))", color: "var(--dsw-alias-label-secondary, inherit)" };
+// [v0.19] 按钮/输入统一用**显式颜色**（不再依赖主题变量：实测 --dsw-alias-fill-tsp-secondary 在该主题下解析成白色 → 白底白字看不见）
+const AP_ROW_BTN = { borderRadius: 6, padding: "2px 8px", fontSize: 11, cursor: "pointer", border: "1px solid rgba(140,145,155,.55)", background: "rgba(120,125,135,.30)", color: "inherit", whiteSpace: "nowrap" };
+const AP_ROW_CHIP = { fontSize: 11, borderRadius: 5, padding: "0 6px", background: "rgba(120,125,135,.28)", color: "inherit" };
+const AP_ROW_INPUT = { borderRadius: 6, border: "1px solid rgba(140,145,155,.5)", background: "rgba(20,22,27,.55)", color: "inherit", padding: "3px 8px", fontSize: 12, fontFamily: "inherit" };
+const AP_ROW_PRIMARY = { ...AP_ROW_BTN, background: "#3b7ddd", borderColor: "#3b7ddd", color: "#fff" };
 // 固定分组（与「独立目标」同属性：不可删除）——须与 core/autopilot.ts 的 PROTECTED_VERSION_SLUGS 保持一致
 const AP_PROTECTED_VERSION_SLUGS = ["interaction", "deploy-test", "backend"];
 function isApProtectedVersion(slug) { return AP_PROTECTED_VERSION_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
@@ -660,7 +727,7 @@ function TrashLane(props) {
   const children = [
     data.versions.length > 0 && h("div", { key: "v", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已移除的版本泳道（恢复后回到看板，数据完整）"),
-      h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 } },
+      h("div", { style: { display: "flex", flexWrap: "nowrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
         data.versions.map((v) => h("div", {
           key: v.dir,
           style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #8a8f98", display: "flex", flexDirection: "column", gap: 4, fontSize: 12 },
@@ -681,7 +748,7 @@ function TrashLane(props) {
         )))),
     data.goals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已归档的目标（恢复后回到原泳道）"),
-      h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 } },
+      h("div", { style: { display: "flex", flexWrap: "nowrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
         data.goals.map((g) => h("div", {
           key: g.id,
           draggable: true,
@@ -700,6 +767,12 @@ function TrashLane(props) {
           h("div", { style: { opacity: 0.6, fontSize: 11 } }, "来源：" + g.from),
           h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
             h("button", { style: AP_ROW_BTN, disabled: !!busy, onClick: () => restore({ action: "restore-goal", goal: g.id }) }, busy.indexOf(g.id) >= 0 ? "…" : "↩ 恢复目标"),
+            // [v0.19] 一键回草稿
+            h("button", {
+              style: AP_ROW_BTN, disabled: !!busy,
+              title: "取消归档并直接回到「草稿」泳道",
+              onClick: () => restore({ action: "to-draft", goal: g.id }),
+            }, "→ 草稿"),
             h("button", {
               style: { ...AP_ROW_BTN, color: "#e05a5a" }, disabled: !!busy,
               title: "彻底删除（不可恢复，需点两次确认）",

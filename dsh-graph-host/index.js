@@ -189,6 +189,9 @@ import {
   applyManagerResult,
   DEFAULT_MANAGER_PROMPT,
   resolveUserHome,
+  setLanePrompt,
+  lanePromptFor,
+  restoreGoalToDraft,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -4486,6 +4489,13 @@ export function apply(ctx, config) {
         const preset = autoPresetFor(`${doc.meta.title ?? ""} ${doc.body ?? ""}`);
         if (preset) briefParts.push(`【执行方式建议】本任务适合参考「${preset}」预设的专业方法执行（系统自动分析推荐；如有更合适的方式可自行判断）。`);
       }
+      // [v0.19] 泳道职责提示词：告知执行子代理「这条泳道是干什么的」（后端/部署测试/交互…）
+      try {
+        const v = doc?.meta?.version;
+        const laneKey = v === undefined ? "backlog" : (v === null ? "standalone" : String(v));
+        const lp = lanePromptFor(root, laneKey);
+        if (lp) briefParts.push(`【本泳道职责（负责人设定，必须对齐）】\n${lp}`);
+      } catch { /* 提示词缺失不阻断派发 */ }
       // [v0.18] 协作频道：注入近期消息 + 其它任务的资源声明（防冲突）
       try {
         const digest = readCollab(root, 10);
@@ -4712,8 +4722,92 @@ export function apply(ctx, config) {
           return { ok: true, entry: out.entry };
         },
       },
-      collabRead: {
-        name: "graph_collab_read",
+      // [v0.19] 主对话全控：一个工具覆盖自驾/泳道提示词/回收站/协作/管理员/目录的全部操作
+      apControl: {
+        name: "graph_ap_control",
+        description: "[autopilot] 主对话控制看板一切：泳道职责提示词、回收站（列出/恢复/彻底删除/回草稿）、协作频道、推荐与完整扫描、全局目标与全局提示词、评审模式、推荐管理员、技能与预设目录、当前状态。",
+        parameters: params({
+          action: {
+            type: "string",
+            description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|catalog_list|status",
+          },
+          lane: { type: "string", description: "泳道键（版本 slug / standalone / backlog / *）" },
+          text: { type: "string", description: "文本（提示词 / 协作消息 / 全局目标 / 全局提示词）" },
+          goal: { type: "string" }, dir: { type: "string" }, version: { type: "string" },
+          picks: { type: "array", items: "number" }, claims: { type: "array", items: "string" },
+          reviewMode: { type: "string" }, managerPrompt: { type: "string" },
+          managerEnabled: { type: "boolean" }, managerIntervalMin: { type: "number" },
+          managerUpdateGlobals: { type: "boolean" }, confirm: { type: "boolean" },
+          workspace: { type: "string" },
+        }, ["action"]),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const action = String(a.action ?? "");
+          const ws = dirname(root);
+          switch (action) {
+            case "lane_prompt_get": return { ok: true, lanePrompts: readAutopilotState(root).lanePrompts ?? {}, text: lanePromptFor(root, a.lane) };
+            case "lane_prompt_set": return { ok: true, ...setLanePrompt(root, String(a.lane ?? ""), a.text ?? null, autopilotActor(ex)) };
+            case "trash_list": return { ok: true, ...listTrash(root) };
+            case "trash_restore": return { ok: true, ...restoreGoalToLane(root, String(a.goal ?? ""), { version: a.version ?? undefined, actor: autopilotActor(ex) }) };
+            case "trash_to_draft": return { ok: true, ...restoreGoalToDraft(root, String(a.goal ?? ""), autopilotActor(ex)) };
+            case "trash_purge":
+              if (a.confirm !== true) return { ok: false, error: "彻底删除需要 confirm=true" };
+              if (a.dir) return { ok: true, ...purgeRemovedVersion(root, String(a.dir), autopilotActor(ex)) };
+              return { ok: true, ...purgeArchivedGoal(root, String(a.goal ?? ""), autopilotActor(ex)) };
+            case "collab_post": {
+              const conflicts = checkClaimConflicts(root, { goal: String(a.goal ?? ""), paths: a.claims });
+              if (conflicts.length) return { ok: false, conflict: true, conflicts };
+              return { ok: true, entry: postCollab(root, { actor: autopilotActor(ex), goal: a.goal ?? null, text: a.text, claims: a.claims }).entry };
+            }
+            case "collab_read": return { ok: true, messages: readCollab(root, 50), claims: activeClaims(root) };
+            case "recs_scan": {
+              const st = readAutopilotState(root);
+              const recs = scanRecommendations(root, { globalGoalText: st.globalGoal?.text ?? null });
+              saveRecommendations(root, recs, { actor: autopilotActor(ex) });
+              return { ok: true, count: recs.length, recommendations: recs };
+            }
+            case "recs_adopt": return { ok: true, ...adoptRecommendations(root, a.picks, { version: a.version ?? null, actor: autopilotActor(ex) }) };
+            case "deep_scan": {
+              const prompt = buildDeepScanPrompt(root, ws);
+              void spawnChild("graph:deep-scan", prompt, { on: () => {} }, root, { role: "pm" });
+              return { ok: true, started: true };
+            }
+            case "global_goal_set": {
+              const t = String(a.text ?? "").trim();
+              return { ok: true, globalGoal: writeAutopilotState(root, { globalGoal: t ? { text: t, updatedAt: new Date().toISOString() } : null }, { actor: autopilotActor(ex) }).globalGoal };
+            }
+            case "global_prompt_set": return { ok: true, globalPrompt: writeAutopilotState(root, { globalPrompt: String(a.text ?? "").trim() || null }, { actor: autopilotActor(ex) }).globalPrompt };
+            case "review_mode_set": {
+              const m = a.reviewMode === "human" ? "human" : "auto";
+              return { ok: true, reviewMode: writeAutopilotState(root, { reviewMode: m }, { actor: autopilotActor(ex) }).reviewMode };
+            }
+            case "manager_get": {
+              const st = readAutopilotState(root);
+              return { ok: true, managerPrompt: st.managerPrompt, defaultPrompt: DEFAULT_MANAGER_PROMPT, managerEnabled: st.managerEnabled, managerIntervalMin: st.managerIntervalMin, managerLastRun: st.managerLastRun, managerUpdateGlobals: st.managerUpdateGlobals, reviewMode: st.reviewMode };
+            }
+            case "manager_set": {
+              const patch = {};
+              if (typeof a.managerPrompt === "string" || a.managerPrompt === null) patch.managerPrompt = a.managerPrompt;
+              if (typeof a.managerEnabled === "boolean") patch.managerEnabled = a.managerEnabled;
+              if (Number.isFinite(Number(a.managerIntervalMin))) patch.managerIntervalMin = Math.max(1, Math.round(Number(a.managerIntervalMin)));
+              if (typeof a.managerUpdateGlobals === "boolean") patch.managerUpdateGlobals = a.managerUpdateGlobals;
+              return { ok: true, ...writeAutopilotState(root, patch, { actor: autopilotActor(ex) }) };
+            }
+            case "manager_run": {
+              const prompt = buildManagerPrompt(root, ws);
+              void spawnChild("graph:rec-manager", prompt, { on: () => {} }, root, { role: "pm" });
+              return { ok: true, started: true };
+            }
+            case "catalog_list": return { ok: true, home: resolveUserHome(), skills: listSkills(), presets: listAgentPresets() };
+            case "status": {
+              const st = readAutopilotState(root);
+              return { ok: true, state: st, recommendations: readRecommendations(root), delivered: listDelivered(root), archived: listArchived(root), versions: readdirSync(join(root, "versions")) };
+            }
+            default: return { ok: false, error: `未知 action：${action}` };
+          }
+        },
+      },
+      collabRead: {        name: "graph_collab_read",
         description: "[协作] 读取协作频道近期消息 + 当前活跃资源声明（谁在改哪些文件）。",
         parameters: params({ limit: { type: "number", description: "条数，默认 30" }, workspace: { type: "string" } }, []),
         run: (a, ex) => {
@@ -4906,6 +5000,12 @@ export function apply(ctx, config) {
               const r = restoreRemovedVersion(root, String(body.dir), "human:gui");
               return json(res, 200, { ok: true, restored: r.slug, ...listTrash(root) });
             }
+            // [v0.19] 归档目标一键回草稿
+            if (action === "to-draft") {
+              if (!body.goal) return json(res, 400, { error: "missing goal" });
+              const r = restoreGoalToDraft(root, String(body.goal), "human:gui");
+              return json(res, 200, { ok: true, restored: r.id, to: "backlog", ...listTrash(root) });
+            }
             // [v0.18] 彻底删除（不可恢复）：必须显式 confirm=true
             if (action === "purge-version" || action === "purge-goal") {
               if (body.confirm !== true) return json(res, 400, { error: "彻底删除需要 confirm=true" });
@@ -4974,8 +5074,8 @@ export function apply(ctx, config) {
             const body = await readBody(req);
             const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
             const ws = workspaceOf(req, body) ?? dirname(root);
-            const prompt = buildDeepScanPrompt(root, ws);
-            appendEvent(root, { actor: "human:gui", event: "autopilot.deep_scan_started", details: { workspace: ws } });
+            const prompt = buildDeepScanPrompt(root, ws, body.hint ?? null);
+            appendEvent(root, { actor: "human:gui", event: "autopilot.deep_scan_started", details: { workspace: ws, hint: String(body.hint ?? "") } });
             const spawned = await spawnChild("graph:deep-scan", prompt, req, root, { role: "pm" });
             if (!spawned.childId) return json(res, 500, { error: spawned.error ?? "拉不起子代理" });
             json(res, 200, { ok: true, child_id: spawned.childId, model_route: spawned.model_route });
@@ -5004,6 +5104,19 @@ export function apply(ctx, config) {
                 globalGoal: st.globalGoal,
                 globalPrompt: st.globalPrompt,
               });
+            }
+            // [v0.19] 泳道职责提示词（告知执行子代理这条泳道是干什么的）
+            if (action === "lane-prompt-get") {
+              return json(res, 200, {
+                ok: true,
+                lane: body.lane ?? null,
+                text: lanePromptFor(root, body.lane),
+                lanePrompts: readAutopilotState(root).lanePrompts ?? {},
+              });
+            }
+            if (action === "lane-prompt-set") {
+              const r = setLanePrompt(root, String(body.lane ?? ""), body.text ?? null, "human:gui");
+              return json(res, 200, { ok: true, ...r, lanePrompts: readAutopilotState(root).lanePrompts ?? {} });
             }
             if (action === "set") {
               const patch = {};

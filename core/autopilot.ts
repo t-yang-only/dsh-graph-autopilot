@@ -44,6 +44,8 @@ export interface AutopilotState {
   managerLastRun: string | null;
   /** [v0.18] 允许管理员顺带维护全局目标 / 全局提示词。 */
   managerUpdateGlobals: boolean;
+  /** [v0.19] 泳道职责提示词：key = 泳道键（版本 slug / standalone / backlog），值 = 该泳道是干什么的（派发时注入执行子代理）。 */
+  lanePrompts: Record<string, string>;
 }
 
 const DEFAULT_STATE: AutopilotState = {
@@ -56,6 +58,7 @@ const DEFAULT_STATE: AutopilotState = {
   managerIntervalMin: 30,
   managerLastRun: null,
   managerUpdateGlobals: true,
+  lanePrompts: {},
 };
 
 export function readAutopilotState(root: string): AutopilotState {
@@ -1076,10 +1079,12 @@ function scanExistingTitles(root: string): string[] {
   return out;
 }
 
-export function buildDeepScanPrompt(root: string, workspace: string): string {
+export function buildDeepScanPrompt(root: string, workspace: string, hint?: string | null): string {
+  const h = String(hint ?? "").trim();
   return [
     "你是 dsh-graph 看板的「完整扫描推荐」分析师。请对下面这个工作区做一次**深度分析**并给出可执行的任务推荐。",
     "",
+    ...(h ? [`【负责人本次指定方向（优先围绕它推荐）】\n${h}`, ""] : []),
     "分析要求：",
     "1. 读「项目正式文件」（README/构建配置/规范文档）判断项目目标与当前阶段；",
     "2. 结合文件树、最近提交、未提交改动，找出**真正值得做**的缺口（未完成功能、明显缺陷、缺失的测试/文档/部署步骤、明显技术债）；",
@@ -1167,4 +1172,46 @@ export function applyManagerResult(
     details: { recommendations: recCount, globalGoalUpdated: goalUpdated, globalPromptUpdated: promptUpdated, notes: String(input.notes ?? "").slice(0, 200) },
   });
   return { recommendations: recCount, globalGoalUpdated: goalUpdated, globalPromptUpdated: promptUpdated };
+}
+
+// ---------------------------------------------------------------------------
+// [v0.19] 泳道职责提示词：告知执行子代理「这条泳道大概是干什么的」（后端 / 部署测试 / 交互 …）
+// ---------------------------------------------------------------------------
+export function setLanePrompt(
+  root: string,
+  lane: string,
+  text: string | null,
+  actor: string,
+): { ok: true; lane: string; text: string | null } {
+  const key = String(lane ?? "").trim();
+  if (!key) throw new GraphError("missing lane");
+  const st = readAutopilotState(root);
+  const next: Record<string, string> = { ...(st.lanePrompts ?? {}) };
+  const t = String(text ?? "").trim();
+  if (t) next[key] = t.slice(0, 4000);
+  else delete next[key];
+  writeAutopilotState(root, { lanePrompts: next }, { actor });
+  appendEvent(root, { actor, event: "autopilot.lane_prompt_set", details: { lane: key, cleared: !t, length: t.length } });
+  return { ok: true, lane: key, text: t || null };
+}
+
+/** 取某泳道的职责提示词（回退到通配 "*"）。 */
+export function lanePromptFor(root: string, laneKey: string | null | undefined): string | null {
+  const m = readAutopilotState(root).lanePrompts ?? {};
+  const key = String(laneKey ?? "").trim();
+  const hit = (key && m[key]) || m["*"];
+  return hit && String(hit).trim() ? String(hit) : null;
+}
+
+/** [v0.19] 归档目标一键回草稿：先取消归档，再移到 backlog（有 cards/attempts 附件时会被拒绝并说明原因）。 */
+export function restoreGoalToDraft(root: string, id: string, actor: string): { ok: true; id: string } {
+  const gid = String(id ?? "").trim();
+  if (!gid) throw new GraphError("missing goal");
+  unarchiveGoal(root, gid, { actor });
+  try {
+    moveGoal(root, gid, { to: "backlog", actor });
+  } catch (e) {
+    throw new GraphError(`已取消归档，但无法移入草稿：${(e as any)?.message ?? e}（带 cards/attempts 附件的目标不能平铺进草稿，可先恢复到原泳道或独立目标）`);
+  }
+  return { ok: true, id: gid };
 }
