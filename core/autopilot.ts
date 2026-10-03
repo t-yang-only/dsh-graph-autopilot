@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, statSy
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { appendEvent, readEvents } from "./events.ts";
-import { createGoal, findGoalFile, loadGoal, setCriteria, GraphError } from "./ops.ts";
+import { createGoal, findGoalFile, loadGoal, setCriteria, normalizeGoalType, GraphError } from "./ops.ts";
 
 export const AUTOPILOT_STATE_FILE = "autopilot.json";
 export const RECOMMENDATIONS_FILE = "autopilot-recommendations.json";
@@ -485,4 +485,133 @@ export function listArchived(root: string): { id: string; title: string; from: s
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// 模板行（可复用的目标蓝图：拖到泳道 → 按模板建目标；模板本身长期留存）
+// ---------------------------------------------------------------------------
+export const TEMPLATES_FILE = "templates.json";
+
+export interface GoalTemplate {
+  id: string;
+  title: string;
+  type: string;
+  description: string;
+  criteria: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+function templateIdFor(title: string): string {
+  const base = title
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  return "tpl-" + (base || "untitled");
+}
+
+function readTemplatesFile(root: string): GoalTemplate[] {
+  const file = join(root, TEMPLATES_FILE);
+  if (!existsSync(file)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((t: any) => t && typeof t.title === "string" && t.title.trim())
+      .map((t: any) => ({
+        id: String(t.id ?? templateIdFor(String(t.title))),
+        title: String(t.title),
+        type: normalizeGoalType(t.type),
+        description: String(t.description ?? ""),
+        criteria: Array.isArray(t.criteria) ? t.criteria.map((c: any) => String(c)).filter((c: string) => c.trim()) : [],
+        created_at: String(t.created_at ?? ""),
+        updated_at: String(t.updated_at ?? t.created_at ?? ""),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function writeTemplatesFile(root: string, list: GoalTemplate[]): void {
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, TEMPLATES_FILE), JSON.stringify(list, null, 2) + "\n", "utf8");
+}
+
+export function listTemplates(root: string): GoalTemplate[] {
+  return readTemplatesFile(root);
+}
+
+export function saveTemplate(
+  root: string,
+  input: { id?: string | null; title: string; type?: string; description?: string; criteria?: string[] },
+  actor: string,
+): GoalTemplate {
+  const title = String(input?.title ?? "").trim();
+  if (!title) throw new GraphError("模板标题不能为空");
+  const list = readTemplatesFile(root);
+  const now = new Date().toISOString();
+  const fields = {
+    title,
+    type: normalizeGoalType(input.type),
+    description: String(input.description ?? ""),
+    criteria: Array.isArray(input.criteria) ? input.criteria.map((c) => String(c)).filter((c) => c.trim()) : [],
+  };
+  const existing = input.id ? list.find((t) => t.id === input.id) : null;
+  if (existing) {
+    Object.assign(existing, fields, { updated_at: now });
+    writeTemplatesFile(root, list);
+    appendEvent(root, { actor, event: "autopilot.template_saved", details: { id: existing.id, mode: "update" } });
+    return existing;
+  }
+  // 新建：id 去重（同题模板追加 -2 / -3 …），保证拖拽落点定位稳定
+  let id = templateIdFor(title);
+  let n = 1;
+  while (list.some((t) => t.id === id)) id = templateIdFor(title) + "-" + ++n;
+  const tpl: GoalTemplate = { id, ...fields, created_at: now, updated_at: now };
+  list.push(tpl);
+  writeTemplatesFile(root, list);
+  appendEvent(root, { actor, event: "autopilot.template_saved", details: { id, mode: "create" } });
+  return tpl;
+}
+
+export function deleteTemplate(root: string, id: string, actor: string): { ok: true; id: string } {
+  const list = readTemplatesFile(root);
+  const next = list.filter((t) => t.id !== id);
+  if (next.length === list.length) throw new GraphError(`模板不存在：${id}`);
+  writeTemplatesFile(root, next);
+  appendEvent(root, { actor, event: "autopilot.template_deleted", details: { id } });
+  return { ok: true, id };
+}
+
+/**
+ * 按模板建目标。version 语义与 createGoal 一致：
+ *   null/undefined → backlog 草稿；"standalone" → 独立目标；其它 → 该版本泳道（不存在则隐式建版本）。
+ * 模板本身不消耗，可反复拖用。
+ */
+export function applyTemplate(
+  root: string,
+  id: string,
+  opts: { version?: string | null; actor: string; confirmCriteria?: boolean },
+): { created: { id: string; title: string; version: string | null }[] } {
+  const tpl = readTemplatesFile(root).find((t) => t.id === id);
+  if (!tpl) throw new GraphError(`模板不存在：${id}`);
+  const goalId = createGoal(root, {
+    title: tpl.title,
+    type: tpl.type,
+    description: tpl.description,
+    actor: opts.actor,
+    version: opts.version ?? undefined,
+  });
+  if (opts.confirmCriteria !== false && tpl.criteria.length > 0) {
+    setCriteria(root, goalId, tpl.criteria.map((c) => `${c} ✅已验前不视为完成`), opts.actor);
+  }
+  const file = findGoalFile(root, goalId);
+  const created = { id: goalId, title: tpl.title, version: loadGoal(file).meta.version ?? null };
+  appendEvent(root, {
+    actor: opts.actor,
+    event: "autopilot.template_applied",
+    details: { template: id, goal: goalId, version: opts.version ?? null },
+  });
+  return { created: [created] };
 }

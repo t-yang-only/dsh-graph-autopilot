@@ -732,6 +732,15 @@
         load();
       }, [showArchived, props?.sessionId, activeWs]); // showArchived/sessionId/activeWs 变化时重新加载
 
+      // [autopilot-fork] 推荐/模板卡拖拽采纳（建目标）后立即强制刷新看板（跳过 304 复用，保证新目标上板）
+      const loadFreshRef = React.useRef(load);
+      loadFreshRef.current = load;
+      React.useEffect(() => {
+        const h = () => { forceFreshRef.current = true; loadFreshRef.current(); };
+        window.addEventListener("autopilot:adopted", h);
+        return () => window.removeEventListener("autopilot:adopted", h);
+      }, []);
+
       // g-258: 按需拉取指定版本的具体数据（去重防竞争）
       const loadVersionGoals = (slug) => {
         if (!slug || !activeWs) return;
@@ -1461,12 +1470,18 @@
               className: isOverThisCollapsed && canDropHere ? "dg-cell-drop-active" : "",
               onClick: () => toggleLaneCollapse(key, false),
               // g-288: 拖放到折叠泳道——高亮并执行移动
-              onDragOver: canDropHere ? (e) => {
+              onDragOver: (e) => {
+                // [autopilot-fork] 推荐/模板卡拖到折叠泳道：允许落点（无条件挂载）
+                if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
+                if (!canDropHere) return;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: "describe", overLaneKey: key, overHalf: "after" } : d);
-              } : undefined,
-              onDrop: canDropHere ? (e) => {
+              },
+              onDrop: (e) => {
+                // [autopilot-fork] 推荐/模板卡落到折叠泳道 = 建目标（版本 slug / standalone / 草稿）
+                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(version || (key === "standalone" ? "standalone" : null)); return; }
+                if (!canDropHere) return;
                 e.preventDefault();
                 if (!dropCommitted.current) {
                   dropCommitted.current = true;
@@ -1475,7 +1490,7 @@
                   toggleLaneCollapse(key, false);
                   commitCrossLaneMove(drag.goalId, key);
                 }
-              } : undefined,
+              },
             }, dgT('lane.collapsedSummary', { count: goals.length })),
           ];
         }
@@ -1539,23 +1554,25 @@
               },
               title: dgT('blocked.collapsedTitle', { count: orderedGoals.length }),
               // g-127：折叠态仍支持拖放（拖入阻塞列）
-              onDragOver: (anyDrag || apDragPick != null) ? (e) => {
-                // [autopilot-fork] 推荐卡拖入折叠列：允许落点
+              onDragOver: (e) => {
+                // [autopilot-fork] 推荐/模板卡拖入折叠列：允许落点（处理器必须**无条件挂载** —— 卡片拖拽不经过看板 drag state）
                 if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
+                if (!anyDrag) return;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 if (!e.target.closest?.(".dg-card")) {
                   setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" } : d);
                 }
-              } : undefined,
-              onDrop: (anyDrag || apDragPick != null) ? (e) => {
-                // [autopilot-fork] 推荐卡落到折叠列 = 采纳为真实目标
-                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(key); return; }
+              },
+              onDrop: (e) => {
+                // [autopilot-fork] 推荐/模板卡落到折叠列 = 建目标（版本 slug；独立目标传 "standalone"；其余 null=草稿）
+                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(version || (key === "standalone" ? "standalone" : null)); return; }
+                if (!anyDrag) return;
                 e.preventDefault();
                 if (!e.target.closest?.(".dg-card")) {
                   commitGoalDrag({ ...drag, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" }, null);
                 }
-              } : undefined,
+              },
             }, summaryText);
           }
           // g-156: 交付列折叠态——竖条汇总替代卡片列表
@@ -1585,32 +1602,35 @@
                 setDeliverColumnCollapsed(false);
               },
               title: dgT('deliver.collapsedTitle', { count }),
-              onDragOver: (anyDrag || apDragPick != null) ? (e) => {
-                // [autopilot-fork] 推荐卡拖入折叠列：允许落点
+              onDragOver: (e) => {
+                // [autopilot-fork] 推荐/模板卡拖入折叠交付列：允许落点（无条件挂载）
                 if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
+                if (!anyDrag) return;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 if (!e.target.closest?.(".dg-card")) {
                   setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" } : d);
                 }
-              } : undefined,
-              onDrop: (anyDrag || apDragPick != null) ? (e) => {
-                // [autopilot-fork] 推荐卡落到折叠列 = 采纳为真实目标
-                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(key); return; }
+              },
+              onDrop: (e) => {
+                // [autopilot-fork] 推荐/模板卡落到折叠交付列 = 建目标
+                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(version || (key === "standalone" ? "standalone" : null)); return; }
+                if (!anyDrag) return;
                 e.preventDefault();
                 if (!e.target.closest?.(".dg-card")) {
                   commitGoalDrag({ ...drag, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" }, null);
                 }
-              } : undefined,
+              },
             }, h(React.Fragment, null, dgT('deliver.label'), h("br"), "", h("br"), dgT('deliver.count', { count })));
           }
           return h("div", {
             key: key + "-" + s.key, // 使用 lane key + stage key 作为唯一 key
             style: { ...S.cell, background: isOverThisCell ? "rgba(76,141,255,.10)" : laneBg },
             className: isOverThisCell && !orderedGoals.some((g) => g.id === drag.goalId) ? "dg-cell-drop-active" : "",
-            onDragOver: (anyDrag || apDragPick != null) ? (e) => {
-              // [autopilot-fork] 推荐卡拖入：允许落点并提示复制
+            onDragOver: (e) => {
+              // [autopilot-fork] 推荐/模板卡拖入：允许落点并提示复制（无条件挂载）
               if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
+              if (!anyDrag) return;
               e.preventDefault();
               e.dataTransfer.dropEffect = "move";
               // 列空白区域：容器及其非卡片子元素触发，避免覆盖卡片落点
@@ -1619,17 +1639,18 @@
                 const effectiveStageKey = (isFromBacklog && isOverThisLane) ? "describe" : s.key;
                 setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: effectiveStageKey, overLaneKey: key, overHalf: "after" } : d);
               }
-            } : undefined,
-            onDrop: (anyDrag || apDragPick != null) ? (e) => {
-              // [autopilot-fork] 推荐卡落到泳道 = 采纳为该版本的真实目标
-              if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(key); return; }
+            },
+            onDrop: (e) => {
+              // [autopilot-fork] 推荐/模板卡落到泳道 = 建目标（版本 slug；独立目标传 "standalone"；其余 null=草稿）
+              if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(version || (key === "standalone" ? "standalone" : null)); return; }
+              if (!anyDrag) return;
               e.preventDefault();
               if (!e.target.closest?.(".dg-card")) {
                 // g-137：backlog 卡拖到版本 lane 时，落点固定为 "describe"（其它列放手也落描述列）
                 const effectiveStageKey = (isFromBacklog && isOverThisLane) ? "describe" : s.key;
                 commitGoalDrag({ ...drag, overGoalId: null, overStageKey: effectiveStageKey, overLaneKey: key, overHalf: "after" }, null);
               }
-            } : undefined,
+            },
           },
             orderedGoals.map((g) => {
               const defExpanded = g.status !== "delivered" && g.status !== "blocked";
@@ -1822,12 +1843,18 @@
               className: isOverThisCollapsed && canDropHere ? "dg-cell-drop-active" : "",
               onClick: () => toggleLaneCollapse(key, false),
               // g-288: 拖放到折叠泳道——高亮并执行移动
-              onDragOver: canDropHere ? (e) => {
+              onDragOver: (e) => {
+                // [autopilot-fork] 推荐/模板卡拖到折叠草稿行：允许落点（无条件挂载）
+                if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
+                if (!canDropHere) return;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: "describe", overLaneKey: key, overHalf: "after" } : d);
-              } : undefined,
-              onDrop: canDropHere ? (e) => {
+              },
+              onDrop: (e) => {
+                // [autopilot-fork] 推荐/模板卡落到草稿行 = 建草稿目标（version=null）
+                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(null); return; }
+                if (!canDropHere) return;
                 e.preventDefault();
                 if (!dropCommitted.current) {
                   dropCommitted.current = true;
@@ -1836,7 +1863,7 @@
                   toggleLaneCollapse(key, false);
                   commitCrossLaneMove(drag.goalId, key);
                 }
-              } : undefined,
+              },
             }, dgT('lane.collapsedSummary', { count })),
           ];
         }
@@ -1879,19 +1906,25 @@
           key: key + "-flat",
           style: { gridColumn: rowSpan, minHeight: 40, borderTop: "1px solid rgba(128,128,128,.35)" },
           className: "dg-backlog-lane" + (isOverThisCell ? " dg-cell-drop-active" : ""),
-          onDragOver: drag ? (e) => {
+          onDragOver: (e) => {
+            // [autopilot-fork] 推荐/模板卡拖到草稿行：允许落点（无条件挂载）
+            if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
+            if (!drag) return;
             e.preventDefault();
             e.dataTransfer.dropEffect = "move";
             if (!e.target?.closest?.(".dg-card")) {
               setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: "describe", overLaneKey: key, overHalf: "after" } : d);
             }
-          } : undefined,
-          onDrop: drag ? (e) => {
+          },
+          onDrop: (e) => {
+            // [autopilot-fork] 推荐/模板卡落到草稿行 = 建草稿目标（version=null）
+            if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(null); return; }
+            if (!drag) return;
             e.preventDefault();
             if (!e.target?.closest?.(".dg-card")) {
               commitGoalDrag({ ...drag, overGoalId: null, overStageKey: "describe", overLaneKey: key, overHalf: "after" }, null);
             }
-          } : undefined,
+          },
         },
           h("div", { className: "dg-backlog-flat" + (vertical ? " dg-backlog-flat-vertical" : "") },
             orderedGoals.map((g) => {
@@ -2091,7 +2124,7 @@
         // 渲染路径**（惰性明细 / 拖动落点 / 新建目标 / 排期入口全部同一条实现，不复制第二套），
         // 第 4 参 vertical=true：单列全宽 + 强制展开（backlog 泳道默认折叠态在窄档里等于
         // 「只有计数没有卡片」，必须显式展开）；卡片全宽见 constants.js 的 .dg-backlog-flat-vertical。
-        rows.push(...backlogRow("backlog", b.backlog, "backlog", true));
+        rows.push(...backlogRow(dgT("view.backlogLane"), b.backlog, "backlog", true));
       } else if (singleLaneMode && standaloneLaneActive) {
         // g-352（att-003 第 5 项③）：独立目标作为唯一泳道时，**复用既有 lane 渲染路径**
         //（卡片 / 拖动 / 新建入口全部同一条实现，不复制第二套），从而「真有卡片」而非只有计数。
@@ -2152,8 +2185,10 @@
       if (!singleColumnMode) {
         rows.push(...lane(dgT("lane.standalone"), b.standalone, "standalone", null, laneIndex));
         laneIndex++;
-        rows.push(...backlogRow("backlog", b.backlog, "backlog"));
+        rows.push(...backlogRow(dgT("view.backlogLane"), b.backlog, "backlog"));
       }
+      // [autopilot-fork] 模板行：固定在看板最底部（可复用目标蓝图，拖到任意泳道即建目标）
+      rows.push(h(TemplateLane, { key: "tpl-lane", workspace: activeWs, fullWidth: singleColumnMode }));
 
       // g-352：单版本模式不渲染 released 折叠区（判据 3：DOM 中仅存在选中版本一个泳道）。
       // g-366：搜索聚合泳道档同理不渲染 released 折叠区（命中若在已发布/已隐藏版本，由聚合泳道直接呈现）。

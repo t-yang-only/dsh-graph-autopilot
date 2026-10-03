@@ -1,21 +1,37 @@
-// [autopilot-fork] 自动驾驶面板 —— 推荐行（标准卡片，可拖进泳道直接建目标执行）+ 全局目标/全局提示词 + 行执行 ▶/⏸ + 归档行。
+// [autopilot-fork] 自动驾驶面板 + 模板行 —— 推荐卡/模板卡（标准卡片，可拖进泳道直接建目标）+ 全局目标/全局提示词 + 行执行 ▶/⏸ + 归档行。
 // 工厂作用域组件；自取数据（/api/dsh-graph-autopilot/*），不侵入看板数据流。
-// 拖拽协议：推荐卡 onDragStart 记 apDragPick（工厂作用域），看板泳道单元格 onDrop 检测后调 apAdoptIntoLane(version)。
-let apDragPick = null;
+// 拖拽协议：卡片 onDragStart 记 apDragPick（工厂作用域），看板泳道落点 onDrop 调 apAdoptIntoLane(target)。
+//   target = 版本 slug（落进该版本）| "standalone"（独立目标）| null（草稿/backlog）
+// ⚠️ 落点侧必须**无条件挂载** onDragOver/onDrop（不能只在看板自身拖拽状态 anyDrag 为真时才挂）——
+//   推荐/模板卡的拖拽不经过看板的 React drag state，条件挂载会让落点根本不存在（曾致「拖上去没反应」）。
+let apDragPick = null; // {kind:"rec"|"tpl", idx}
 let apPanelWorkspace = null;
-function apDragStart(idx) { apDragPick = idx; }
+let apNoticeSink = null; // AutopilotPanel 挂载时注册：给协议函数（非 React 上下文）回显结果
+function apDragStart(kind, idx) { apDragPick = { kind, idx }; }
 function apDragEnd() { apDragPick = null; }
-function apAdoptIntoLane(version) {
-  const idx = apDragPick;
+function apNotify(text) { try { apNoticeSink && apNoticeSink(text); } catch { /* 面板未挂载 */ } }
+function apAdoptIntoLane(target) {
+  const pick = apDragPick;
   apDragPick = null;
-  if (idx == null || !apPanelWorkspace) return;
-  fetch("/api/dsh-graph-autopilot/adopt", {
+  if (!pick || !apPanelWorkspace) return;
+  const isTpl = pick.kind === "tpl";
+  const payload = isTpl
+    ? { workspace: apPanelWorkspace, template: pick.idx, version: target === undefined ? null : target }
+    : { workspace: apPanelWorkspace, picks: [pick.idx], version: target === undefined ? null : target };
+  apNotify("… 正在按" + (isTpl ? "模板" : "推荐") + "建目标");
+  fetch("/api/dsh-graph-autopilot/" + (isTpl ? "template-apply" : "adopt"), {
     method: "POST", credentials: "same-origin",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ workspace: apPanelWorkspace, picks: [idx], version: version || null }),
-  }).then((r) => r.json()).then((d) => {
-    window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
-  }).catch(() => {});
+    body: JSON.stringify(payload),
+  })
+    .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok) { apNotify("❌ 建目标失败：" + (d?.error ?? "未知错误")); return; }
+      const names = (d?.created ?? []).map((c) => `${c.id} ${c.title}`).join("、");
+      apNotify("✅ 已建目标：" + (names || "—") + (payload.version ? "（" + payload.version + "）" : "（草稿）"));
+      window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
+    })
+    .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
 }
 
 function AutopilotPanel(props) {
@@ -31,6 +47,9 @@ function AutopilotPanel(props) {
   const [busy, setBusy] = React.useState("");
   const [msg, setMsg] = React.useState("");
   const [showArch, setShowArch] = React.useState(false);
+  // 拖拽协议（模块作用域函数）在 React 之外执行 → 结果回显走这个注册出口
+  apNoticeSink = setMsg;
+  React.useEffect(() => () => { if (apNoticeSink === setMsg) apNoticeSink = null; }, []);
 
   const load = React.useCallback(() => {
     if (!workspace) return;
@@ -121,7 +140,7 @@ function AutopilotPanel(props) {
         key: i,
         draggable: true,
         title: "拖到泳道即建目标；松手即采纳",
-        onDragStart: (e) => { try { e.dataTransfer.setData("text/plain", "autopilot-rec:" + (i + 1)); e.dataTransfer.effectAllowed = "copy"; } catch { /* 旧引擎 */ } apDragStart(i + 1); },
+        onDragStart: (e) => { try { e.dataTransfer.setData("text/plain", "autopilot-rec:" + (i + 1)); e.dataTransfer.effectAllowed = "copy"; } catch { /* 旧引擎 */ } apDragStart("rec", i + 1); },
         onDragEnd: () => apDragEnd(),
         style: {
           background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px",
@@ -189,7 +208,152 @@ function AutopilotPanel(props) {
     msg && h("div", { style: { color: "#e05a5a" } }, msg),
   );
 }
+// ---------------------------------------------------------------------------
+// 模板行（看板最底部一行）：可复用目标蓝图 —— 卡片直接拖到任意泳道即按模板建目标
+// ---------------------------------------------------------------------------
+const AP_TEMPLATE_TYPES = ["feature", "bug", "task", "improvement", "patch", "chore"];
+
+function TemplateLane(props) {
+  const workspace = props?.workspace ?? null;
+  if (workspace) apPanelWorkspace = workspace; // 保底：面板未挂载时模板拖拽也有 workspace
+  const [items, setItems] = React.useState([]);
+  const [form, setForm] = React.useState(null); // {id?, title, type, description, criteriaText}
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg] = React.useState("");
+
+  const load = React.useCallback(() => {
+    if (!workspace) return;
+    fetch("/api/dsh-graph-autopilot/templates", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "list" }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.ok) setItems(Array.isArray(d.templates) ? d.templates : []); })
+      .catch(() => {});
+  }, [workspace]);
+
+  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => {
+    const h = () => load();
+    window.addEventListener("autopilot:adopted", h);
+    return () => window.removeEventListener("autopilot:adopted", h);
+  }, [load]);
+
+  const send = (body) => fetch("/api/dsh-graph-autopilot/templates", {
+    method: "POST", credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workspace, ...body }),
+  }).then((r) => r.json().then((d) => ({ ok: r.ok, d })));
+
+  const save = () => {
+    if (!form) return;
+    const title = String(form.title ?? "").trim();
+    if (!title) { setMsg("❌ 模板标题不能为空"); return; }
+    setBusy(true); setMsg("");
+    send({
+      action: form.id ? "update" : "create",
+      id: form.id ?? null,
+      title,
+      type: form.type,
+      description: form.description,
+      criteria: String(form.criteriaText ?? "").split("\n").map((s) => s.trim()).filter(Boolean),
+    })
+      .then(({ ok, d }) => {
+        if (!ok) setMsg("❌ " + (d?.error ?? "保存失败"));
+        else { setItems(Array.isArray(d.templates) ? d.templates : []); setForm(null); setMsg(""); }
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setBusy(false));
+  };
+
+  const del = (id) => {
+    setBusy(true);
+    send({ action: "delete", id })
+      .then(({ ok, d }) => {
+        if (!ok) setMsg("❌ " + (d?.error ?? "删除失败"));
+        else { setItems(Array.isArray(d.templates) ? d.templates : []); setMsg(""); }
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setBusy(false));
+  };
+
+  const btn = { borderRadius: 6, padding: "2px 8px", fontSize: 11, cursor: "pointer", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.12))", color: "inherit", whiteSpace: "nowrap" };
+  const btnPrimary = { ...btn, background: "var(--dsw-alias-button-primary-fill, rgba(76,141,255,.9))", color: "#fff", borderColor: "transparent" };
+  const chip = { fontSize: 11, borderRadius: 5, padding: "0 6px", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.15))", color: "var(--dsw-alias-label-secondary, inherit)" };
+  const input = { borderRadius: 6, border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "transparent", color: "inherit", padding: "3px 8px", fontSize: 12, fontFamily: "inherit" };
+  const labelBg = "rgba(128,128,128,.10)";
+
+  const labelEl = h("div", {
+    key: "tpl-lane-label",
+    style: { padding: "8px 10px", borderRadius: 8, background: labelBg, display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start", justifyContent: "center", minWidth: 0, ...(props?.fullWidth ? { gridColumn: "1 / -1" } : {}) },
+  },
+    h("span", { style: { fontWeight: 700, fontSize: 12 } }, "🧩 模板 · " + items.length),
+    h("button", {
+      style: btn, disabled: !!busy,
+      title: "新建模板：填写标题/类型/描述/判据，之后拖到泳道即可复用",
+      onClick: () => setForm((f) => f ?? { id: null, title: "", type: "task", description: "", criteriaText: "" }),
+    }, "＋ 新建"),
+  );
+
+  const cards = items.length > 0
+    ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 8 } },
+      items.map((t) => h("div", {
+        key: t.id,
+        draggable: true,
+        title: "拖到任意泳道/列即按模板建目标；模板保留可重复使用",
+        onDragStart: (e) => {
+          try { e.dataTransfer.setData("text/plain", "autopilot-tpl:" + t.id); e.dataTransfer.effectAllowed = "copy"; } catch { /* 旧引擎 */ }
+          apDragStart("tpl", t.id);
+        },
+        onDragEnd: () => apDragEnd(),
+        style: {
+          background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px",
+          border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))",
+          borderLeft: "3px solid #8a8f98", cursor: "grab", display: "flex", flexDirection: "column", gap: 4, fontSize: 12,
+        },
+      },
+        h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
+          h("b", { style: { fontSize: 12 } }, t.title),
+          h("span", { style: chip }, t.type),
+        ),
+        t.description && h("div", { style: { opacity: 0.72, fontSize: 11 } }, t.description),
+        Array.isArray(t.criteria) && t.criteria.length > 0 && h("div", { style: { opacity: 0.55, fontSize: 11 } }, "判据: " + t.criteria.slice(0, 2).join(" / ") + (t.criteria.length > 2 ? " …" : "")),
+        h("div", { style: { display: "flex", gap: 6, alignItems: "center", marginTop: 2 } },
+          h("span", { style: { flex: 1 } }),
+          h("button", { style: btn, disabled: !!busy, onClick: () => setForm({ id: t.id, title: t.title, type: t.type, description: t.description, criteriaText: (t.criteria ?? []).join("\n") }) }, "✎ 编辑"),
+          h("button", { style: btn, disabled: !!busy, onClick: () => del(t.id) }, "✕ 删除"),
+        ),
+      )))
+    : h("div", { style: { opacity: 0.6, fontSize: 12, padding: "6px 0" } }, "暂无模板。点「＋ 新建」建一个可复用任务蓝图；建好后把卡片拖到上方任意泳道即可建目标执行。");
+
+  const contentEl = h("div", {
+    key: "tpl-lane-body",
+    style: { gridColumn: props?.fullWidth ? "1 / -1" : "2 / -1", display: "flex", flexDirection: "column", gap: 8, minWidth: 0, padding: "8px 10px", borderRadius: 8, background: "rgba(128,128,128,.04)" },
+  },
+    form && h("div", { style: { display: "flex", flexDirection: "column", gap: 6, padding: 8, borderRadius: 8, border: "1px dashed var(--dsw-alias-border-secondary, rgba(128,128,128,.4))" } },
+      h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
+        h("span", { style: { fontSize: 12, fontWeight: 700 } }, form.id ? "编辑模板" : "新建模板"),
+        h("input", { style: { ...input, flex: 1, minWidth: 180 }, placeholder: "模板标题（必填）", value: form.title, onChange: (e) => setForm((f) => ({ ...f, title: e.target.value })) }),
+        h("select", { style: input, value: form.type, onChange: (e) => setForm((f) => ({ ...f, type: e.target.value })) },
+          AP_TEMPLATE_TYPES.map((t) => h("option", { key: t, value: t }, t))),
+      ),
+      h("textarea", { style: { ...input, height: 44, resize: "vertical" }, placeholder: "任务描述（会写进 goal.md）", value: form.description, onChange: (e) => setForm((f) => ({ ...f, description: e.target.value })) }),
+      h("textarea", { style: { ...input, height: 44, resize: "vertical" }, placeholder: "验收判据，一行一条（建目标时自动写入并确认）", value: form.criteriaText, onChange: (e) => setForm((f) => ({ ...f, criteriaText: e.target.value })) }),
+      h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+        h("button", { style: btnPrimary, disabled: !!busy, onClick: save }, busy ? "…" : "保存模板"),
+        h("button", { style: btn, disabled: !!busy, onClick: () => { setForm(null); setMsg(""); } }, "取消"),
+        msg && h("span", { style: { color: "#e05a5a", fontSize: 11 } }, msg),
+      ),
+    ),
+    !form && msg && h("div", { style: { color: "#e05a5a", fontSize: 11 } }, msg),
+    cards,
+  );
+
+  return h(React.Fragment, null, labelEl, contentEl);
+}
+
 >>>ESM-EXPORTS-START>>>
 // 仅 node --test / 静态检查用；浏览器 bundle 由 build-client.sh 剥离本块。
-export { AutopilotPanel, apDragStart, apDragEnd, apAdoptIntoLane };
+export { AutopilotPanel, TemplateLane, apDragStart, apDragEnd, apAdoptIntoLane };
 <<<ESM-EXPORTS-END<<<

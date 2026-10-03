@@ -167,6 +167,10 @@ import {
   autoPresetFor,
   listArchived,
   listDelivered,
+  listTemplates,
+  saveTemplate,
+  deleteTemplate,
+  applyTemplate,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -4713,6 +4717,54 @@ export function apply(ctx, config) {
             const text = String(body.text ?? "").trim();
             const state = writeAutopilotState(root, { globalGoal: text ? { text, updatedAt: new Date().toISOString() } : null }, { actor: "human:gui" });
             json(res, 200, { ok: true, globalGoal: state.globalGoal });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      // [autopilot-fork] 模板行：list / create / update / delete（统一 POST，避免 GET 查询串解析差异）
+      {
+        path: "/api/dsh-graph-autopilot/templates",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const action = String(body.action ?? "list");
+            if (action === "list") return json(res, 200, { ok: true, templates: listTemplates(root) });
+            if (action === "delete") {
+              if (!body.id) return json(res, 400, { error: "missing id" });
+              deleteTemplate(root, String(body.id), "human:gui");
+              return json(res, 200, { ok: true, templates: listTemplates(root) });
+            }
+            if (action === "create" || action === "update") {
+              const tpl = saveTemplate(
+                root,
+                {
+                  id: action === "update" ? body.id : null,
+                  title: body.title,
+                  type: body.type,
+                  description: body.description,
+                  criteria: body.criteria,
+                },
+                "human:gui",
+              );
+              return json(res, 200, { ok: true, template: tpl, templates: listTemplates(root) });
+            }
+            return json(res, 400, { error: `未知 action：${action}` });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      {
+        path: "/api/dsh-graph-autopilot/template-apply",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            if (!body.template) return json(res, 400, { error: "missing template" });
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const out = applyTemplate(root, String(body.template), { version: body.version ?? null, actor: "human:gui" });
+            let runRes = null;
+            if (body.run === true && body.version && body.version !== "standalone") runRes = autopilotStart(root, body.version, body.review_mode, "human:gui");
+            json(res, 200, { ok: true, ...out, run: runRes });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },
       },

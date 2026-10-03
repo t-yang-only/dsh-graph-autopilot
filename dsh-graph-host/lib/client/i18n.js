@@ -294,7 +294,8 @@
       'view.pickVersionTooltip': '选择要查看的版本',
       'view.allVersions': '全部版本',
       // g-352（负责人裁决）：backlog 也可作为单版本档的一个「版本备选」（唯一泳道）。
-      'view.backlogLane': 'backlog',
+      // [autopilot-fork] 泳道显示名改「草稿」（负责人 2026-10-03 指定；内部标识仍是 backlog）
+      'view.backlogLane': '草稿',
       // g-287：历史遗留「非 backlog 草稿」转入规划入口（backlog 卡不显示，其正确路径是排期）
       'goal.planEntry': '🧭 转入规划',
       'goal.planEntryTooltip': '将该草稿目标转入规划（状态变为「规划中」，可开始收集/就绪/派发执行）',
@@ -1353,7 +1354,7 @@
       'view.pickVersionTooltip': 'Choose a version to view',
       'view.allVersions': 'All versions',
       // g-352 (owner ruling): backlog is also selectable as a single-version-tier lane alternative.
-      'view.backlogLane': 'Backlog',
+      'view.backlogLane': 'Drafts',
       // g-287: entry to move a legacy non-backlog draft goal into planning
       // (not shown for backlog cards — their correct path is scheduling)
       'goal.planEntry': '🧭 Move to planning',
