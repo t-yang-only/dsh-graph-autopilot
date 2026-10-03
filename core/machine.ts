@@ -41,6 +41,9 @@ export interface TransitionContext {
   reason?: string;
   /** 强制迁移：跳过 in_progress 门槛（GUI 拖放视为人工授权）。 */
   force?: boolean;
+  /** [autopilot-fork] 自由手动迁移：人工操作允许任意状态互迁（跳过状态机映射与前置门槛），
+   *  仅保留状态合法性检查。自动链路（执行器/主管工具）不得传 free。 */
+  free?: boolean;
 }
 
 /**
@@ -60,6 +63,9 @@ export function assertTransition(
     throw new GraphError(`目标状态非法：${to}`);
   }
   if (from === to) throw new GraphError(`状态未变化：${from}`);
+
+  // [autopilot-fork] 自由手动迁移：人工授权下任意状态互迁（合法性检查已在上面的 STATUSES 完成）
+  if (ctx.free) return;
 
   if (from === "blocked") {
     const back = meta.blocked_from as string | undefined;

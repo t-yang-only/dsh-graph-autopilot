@@ -3077,7 +3077,8 @@ export function apply(ctx, config) {
           const body = await readBody(req);
           const { goal, to, reason, force } = body;
           if (!goal || !to) return json(res, 400, { error: "missing goal or to" });
-          transition(rootForReq(req, body), goal, to, { reason, force, actor: "human:gui" });
+          // [autopilot-fork] GUI 迁移 = 人工授权：free=true 允许任意状态自由互迁（delivered→planning 等）
+          transition(rootForReq(req, body), goal, to, { reason, force, free: true, actor: "human:gui" });
           json(res, 200, { ok: true });
         } catch (e) {
           // GraphError → 400（参照 /accept 模式但用 400 而非 500）

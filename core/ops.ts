@@ -1938,7 +1938,7 @@ export function transition(
   root: string,
   id: string,
   to: string,
-  opts: { reason?: string; actor: string; force?: boolean },
+  opts: { reason?: string; actor: string; force?: boolean; free?: boolean },
 ): void {
   const file = findGoalFile(root, id);
   if (isBacklogFile(file, root)) {
@@ -1955,6 +1955,7 @@ export function transition(
     criteriaConfirmed,
     reason: opts.reason,
     force: opts.force,
+    free: opts.free,
   });
   if (to === "blocked") {
     doc.meta.blocked_from = from;

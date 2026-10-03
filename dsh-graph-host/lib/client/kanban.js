@@ -1539,14 +1539,18 @@
               },
               title: dgT('blocked.collapsedTitle', { count: orderedGoals.length }),
               // g-127：折叠态仍支持拖放（拖入阻塞列）
-              onDragOver: anyDrag ? (e) => {
+              onDragOver: (anyDrag || apDragPick != null) ? (e) => {
+                // [autopilot-fork] 推荐卡拖入折叠列：允许落点
+                if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 if (!e.target.closest?.(".dg-card")) {
                   setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" } : d);
                 }
               } : undefined,
-              onDrop: anyDrag ? (e) => {
+              onDrop: (anyDrag || apDragPick != null) ? (e) => {
+                // [autopilot-fork] 推荐卡落到折叠列 = 采纳为真实目标
+                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(key); return; }
                 e.preventDefault();
                 if (!e.target.closest?.(".dg-card")) {
                   commitGoalDrag({ ...drag, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" }, null);
@@ -1581,14 +1585,18 @@
                 setDeliverColumnCollapsed(false);
               },
               title: dgT('deliver.collapsedTitle', { count }),
-              onDragOver: anyDrag ? (e) => {
+              onDragOver: (anyDrag || apDragPick != null) ? (e) => {
+                // [autopilot-fork] 推荐卡拖入折叠列：允许落点
+                if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 if (!e.target.closest?.(".dg-card")) {
                   setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" } : d);
                 }
               } : undefined,
-              onDrop: anyDrag ? (e) => {
+              onDrop: (anyDrag || apDragPick != null) ? (e) => {
+                // [autopilot-fork] 推荐卡落到折叠列 = 采纳为真实目标
+                if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(key); return; }
                 e.preventDefault();
                 if (!e.target.closest?.(".dg-card")) {
                   commitGoalDrag({ ...drag, overGoalId: null, overStageKey: s.key, overLaneKey: key, overHalf: "after" }, null);
@@ -1600,7 +1608,9 @@
             key: key + "-" + s.key, // 使用 lane key + stage key 作为唯一 key
             style: { ...S.cell, background: isOverThisCell ? "rgba(76,141,255,.10)" : laneBg },
             className: isOverThisCell && !orderedGoals.some((g) => g.id === drag.goalId) ? "dg-cell-drop-active" : "",
-            onDragOver: anyDrag ? (e) => {
+            onDragOver: (anyDrag || apDragPick != null) ? (e) => {
+              // [autopilot-fork] 推荐卡拖入：允许落点并提示复制
+              if (apDragPick != null) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; return; }
               e.preventDefault();
               e.dataTransfer.dropEffect = "move";
               // 列空白区域：容器及其非卡片子元素触发，避免覆盖卡片落点
@@ -1610,7 +1620,9 @@
                 setDrag((d) => d ? { ...d, overGoalId: null, overStageKey: effectiveStageKey, overLaneKey: key, overHalf: "after" } : d);
               }
             } : undefined,
-            onDrop: anyDrag ? (e) => {
+            onDrop: (anyDrag || apDragPick != null) ? (e) => {
+              // [autopilot-fork] 推荐卡落到泳道 = 采纳为该版本的真实目标
+              if (apDragPick != null) { e.preventDefault(); apAdoptIntoLane(key); return; }
               e.preventDefault();
               if (!e.target.closest?.(".dg-card")) {
                 // g-137：backlog 卡拖到版本 lane 时，落点固定为 "describe"（其它列放手也落描述列）
@@ -2547,8 +2559,6 @@
              }
            } : undefined },
         h("style", null, HOVER_CSS),
-        // [autopilot-fork] 自动驾驶面板：全局目标/提示词 + 推荐 + 行执行 ▶ + 归档
-        h(AutopilotPanel, { workspace: activeWs }),
         // g-352 att-005：头部（标题 + 版本链接 + 更新时间 + 工具条 + DEBUG + 搜索框）是**两个宿主
         // 共用的同一份实现**（同一个 KanbanView，零 host 门控），class 与样式在两侧完全一致。
         // style 仍是 S.head 本体（不新增样式键）；布局兜底走 .dg-head（见 constants.js：
@@ -3420,6 +3430,8 @@
                   }, dgT("common.cancel"))),
                 deleteVersionNote ? h("div", { style: { ...S.meta, marginTop: 8 } }, deleteVersionNote) : null))
           : null,
+        // [autopilot-fork] 自动驾驶面板（看板底部）：推荐卡片（可拖进泳道）+ 全局目标/提示词 + 行执行 ▶ + 归档
+        h(AutopilotPanel, { workspace: activeWs }),
       );
     }
 
