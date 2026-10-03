@@ -14,10 +14,29 @@ function apAdoptIntoLane(target) {
   const pick = apDragPick;
   apDragPick = null;
   if (!pick || !apPanelWorkspace) return;
+  const version = target === undefined ? null : target;
+  // [v0.18] 从回收站拖出：恢复该目标并直接落到目标泳道
+  if (pick.kind === "trash") {
+    apNotify("… 正在从回收站恢复到 " + (version || "草稿"));
+    fetch("/api/dsh-graph-autopilot/trash", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace: apPanelWorkspace, action: "restore-goal", goal: pick.idx, version }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { apNotify("❌ 恢复失败：" + (d?.error ?? "未知错误")); return; }
+        apNotify("✅ 已恢复并落到 " + (version || "草稿") + "：" + (d?.restored ?? ""));
+        window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
+        window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
+      })
+      .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
+    return;
+  }
   const isTpl = pick.kind === "tpl";
   const payload = isTpl
-    ? { workspace: apPanelWorkspace, template: pick.idx, version: target === undefined ? null : target }
-    : { workspace: apPanelWorkspace, picks: [pick.idx], version: target === undefined ? null : target };
+    ? { workspace: apPanelWorkspace, template: pick.idx, version }
+    : { workspace: apPanelWorkspace, picks: [pick.idx], version };
   apNotify("… 正在按" + (isTpl ? "模板" : "推荐") + "建目标");
   fetch("/api/dsh-graph-autopilot/" + (isTpl ? "template-apply" : "adopt"), {
     method: "POST", credentials: "same-origin",
@@ -30,6 +49,25 @@ function apAdoptIntoLane(target) {
       const names = (d?.created ?? []).map((c) => `${c.id} ${c.title}`).join("、");
       apNotify("✅ 已建目标：" + (names || "—") + (payload.version ? "（" + payload.version + "）" : "（草稿）"));
       window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
+    })
+    .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
+}
+
+/** [v0.18] 看板卡片拖到回收站 = 归档该目标（可从回收站恢复） */
+function apArchiveGoal(goalId) {
+  if (!goalId || !apPanelWorkspace) return;
+  apNotify("… 正在移入回收站：" + goalId);
+  fetch("/api/dsh-graph-autopilot/archive", {
+    method: "POST", credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workspace: apPanelWorkspace, goal: goalId }),
+  })
+    .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok) { apNotify("❌ 移入回收站失败：" + (d?.error ?? "未知错误")); return; }
+      apNotify("🗑 已移入回收站：" + goalId + "（可在回收站恢复）");
+      window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
+      window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { archived: goalId } }));
     })
     .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
 }
@@ -47,6 +85,13 @@ function AutopilotPanel(props) {
   const [busy, setBusy] = React.useState("");
   const [msg, setMsg] = React.useState("");
   const [showArch, setShowArch] = React.useState(false);
+  // [v0.18] 推荐管理员 + 协作频道
+  const [mgr, setMgr] = React.useState(null);
+  const [mgrPrompt, setMgrPrompt] = React.useState("");
+  const [mgrOpen, setMgrOpen] = React.useState(false);
+  const [collab, setCollab] = React.useState({ messages: [], claims: [] });
+  const [collabOpen, setCollabOpen] = React.useState(false);
+  const [collabText, setCollabText] = React.useState("");
   // 拖拽协议（模块作用域函数）在 React 之外执行 → 结果回显走这个注册出口
   apNoticeSink = setMsg;
   React.useEffect(() => () => { if (apNoticeSink === setMsg) apNoticeSink = null; }, []);
@@ -70,6 +115,27 @@ function AutopilotPanel(props) {
         try { for (const v of (d.versions ?? [])) vs.push(v?.name ?? v?.id ?? v); } catch { /* 形状防御 */ }
         setVersions(vs.filter((x) => typeof x === "string" && x));
       })
+      .catch(() => {});
+    // [v0.18] 推荐管理员状态 + 协作频道
+    fetch("/api/dsh-graph-autopilot/manager", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "get" }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d?.ok) return;
+        setMgr(d);
+        setMgrPrompt(d.managerPrompt ?? d.defaultPrompt ?? "");
+      })
+      .catch(() => {});
+    fetch("/api/dsh-graph-autopilot/collab", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "list", limit: 30 }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.ok) setCollab({ messages: d.messages ?? [], claims: d.claims ?? [] }); })
       .catch(() => {});
   }, [workspace]);
 
@@ -106,6 +172,24 @@ function AutopilotPanel(props) {
 
   if (!workspace) return null;
 
+  /** [v0.18] 推荐管理员设置写入 */
+  const mgrSet = (patch) => {
+    setBusy("manager-set");
+    return fetch("/api/dsh-graph-autopilot/manager", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "set", ...patch }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) setMsg("❌ " + (d?.error ?? "保存失败"));
+        else setMgr((m) => ({ ...(m ?? {}), ...d }));
+        return d;
+      })
+      .catch((e) => { setMsg("❌ " + (e?.message ?? "网络错误")); return null; })
+      .finally(() => setBusy(""));
+  };
+
   const btn = { borderRadius: 6, padding: "3px 9px", fontSize: 12, cursor: "pointer", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.12))", color: "inherit", whiteSpace: "nowrap" };
   const btnPrimary = { ...btn, background: "var(--dsw-alias-button-primary-fill, rgba(76,141,255,.9))", color: "#fff", borderColor: "transparent" };
   const chip = { fontSize: 11, borderRadius: 5, padding: "1px 6px", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.15))", color: "var(--dsw-alias-label-secondary, inherit)" };
@@ -124,6 +208,11 @@ function AutopilotPanel(props) {
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "💡 推荐"),
       h("button", { style: btn, disabled: !!busy, onClick: () => post("scan", {}).then(load) }, busy === "scan" ? "扫描中…" : "扫描推荐"),
+      h("button", {
+        style: btn, disabled: !!busy,
+        title: "完整扫描：拉一个子代理深度分析工作区与项目正式文件（README/构建配置/提交历史等），再由 AI 回写推荐清单",
+        onClick: () => post("deep-scan", {}).then((d) => { if (d?.ok) setMsg("🔍 完整扫描已启动（子代理 " + (d.child_id ?? "") + "），完成后推荐清单会自动更新"); return load(); }),
+      }, busy === "deep-scan" ? "启动中…" : "🔍 完整扫描"),
       h("span", { style: chip }, recs.length + " 条"),
       h("span", { style: { opacity: 0.65 } }, "把卡片拖到任意泳道即可建目标执行；或勾选后批量采纳"),
       pickedIdxs.length > 0 && h("button", { style: btn, disabled: !!busy, onClick: () => post("adopt", { picks: pickedIdxs, version: null }).then(() => { setPicked({}); load(); }) }, "采纳所选 → backlog"),
@@ -185,6 +274,18 @@ function AutopilotPanel(props) {
     // —— 行执行（每版本 ▶）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "▶ 行执行"),
+      // [v0.18] 评审模式：默认机审（机器门禁后自动裁决）；切到人审则停在「确认」等人
+      h("span", { style: chip }, "评审"),
+      h("select", {
+        style: { ...input, flex: "0 0 auto", minWidth: 92 },
+        value: st?.state?.reviewMode ?? "auto",
+        disabled: !!busy,
+        title: "机审=机器门禁通过即自动裁决（默认）；人审=停在确认列等负责人裁决",
+        onChange: (e) => mgrSet({ reviewMode: e.target.value }).then(load),
+      },
+        h("option", { value: "auto" }, "机审（默认）"),
+        h("option", { value: "human" }, "人审"),
+      ),
       runner
         ? h("button", { style: { ...btn, color: "#e05a5a" }, disabled: !!busy, onClick: () => post("stop", {}).then(load) }, "⏸ 中断本行")
         : null,
@@ -205,6 +306,67 @@ function AutopilotPanel(props) {
     showArch && h("div", { style: { display: "flex", flexDirection: "column", gap: 2, padding: "2px 0 0 14px", opacity: 0.8 } },
       (st?.archived ?? []).map((g, i) => h("span", { key: i, style: chip }, `${g.id} ${g.title} · ${g.from}`)),
     ),
+    // —— [v0.18] AI 推荐管理员（独立上行文；实时管理推荐 / 全局目标 / 全局提示词）——
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+      h("strong", { style: { flexShrink: 0 } }, "🤖 推荐管理"),
+      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
+        h("input", {
+          type: "checkbox", checked: !!mgr?.managerEnabled,
+          onChange: (e) => mgrSet({ managerEnabled: e.target.checked }),
+        }),
+        "启用实时管理",
+      ),
+      h("span", { style: chip }, "间隔"),
+      h("input", {
+        style: { ...input, width: 56 }, type: "number", min: 1, max: 1440,
+        value: mgr?.managerIntervalMin ?? 30,
+        onChange: (e) => setMgr((m) => ({ ...(m ?? {}), managerIntervalMin: Number(e.target.value) })),
+        onBlur: (e) => mgrSet({ managerIntervalMin: Number(e.target.value) }),
+      }),
+      h("span", { style: chip }, "分钟"),
+      h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
+        h("input", {
+          type: "checkbox", checked: mgr?.managerUpdateGlobals !== false,
+          onChange: (e) => mgrSet({ managerUpdateGlobals: e.target.checked }),
+        }),
+        "允许维护全局目标/提示词",
+      ),
+      h("button", { style: btnPrimary, disabled: !!busy, onClick: () => post("manager", { action: "run" }).then(load) }, busy === "manager" ? "…" : "立即运行管理"),
+      h("button", { style: btn, onClick: () => setMgrOpen(!mgrOpen) }, mgrOpen ? "收起上行文" : "编辑上行文"),
+      mgr?.managerLastRun && h("span", { style: { opacity: 0.6, fontSize: 11 } }, "上次：" + String(mgr.managerLastRun).replace("T", " ").slice(0, 19)),
+    ),
+    mgrOpen && h("div", { style: { display: "flex", flexDirection: "column", gap: 4, padding: "0 0 0 14px" } },
+      h("textarea", {
+        style: { ...input, minWidth: 0, height: 110, resize: "vertical", fontFamily: "inherit" },
+        value: mgrPrompt,
+        placeholder: "管理员独立上行文：定义它如何管理推荐清单、全局目标与全局提示词（留空=用内置默认上行文）",
+        onChange: (e) => setMgrPrompt(e.target.value),
+      }),
+      h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+        h("button", { style: btnPrimary, disabled: !!busy, onClick: () => mgrSet({ managerPrompt: mgrPrompt }) }, "保存上行文"),
+        h("button", { style: btn, onClick: () => setMgrPrompt(mgr?.defaultPrompt ?? "") }, "载入内置默认"),
+      ),
+    ),
+    // —— [v0.18] 协作频道（任务间沟通 + 资源占用，防冲突）——
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+      h("strong", { style: { flexShrink: 0 } }, "💬 协作"),
+      h("span", { style: chip }, (collab.messages?.length ?? 0) + " 条消息"),
+      (collab.claims?.length ?? 0) > 0 && h("span", { style: chip }, "占用中 " + collab.claims.length),
+      h("button", { style: btn, onClick: () => setCollabOpen(!collabOpen) }, collabOpen ? "收起频道" : "打开频道"),
+      h("button", { style: btn, disabled: !!busy, onClick: () => load() }, "刷新"),
+    ),
+    collabOpen && h("div", { style: { display: "flex", flexDirection: "column", gap: 4, padding: "0 0 0 14px", maxHeight: 180, overflow: "auto" } },
+      (collab.messages ?? []).slice(-15).map((m, i) => h("div", { key: i, style: { fontSize: 11, opacity: 0.85 } },
+        `${String(m.at ?? "").slice(11, 19)} ${m.actor}${m.goal ? " @" + m.goal : ""}${m.kind === "release" ? "（释放）" : ""}：${m.text || (m.claims ?? []).join("、")}`)),
+      (collab.messages ?? []).length === 0 && h("div", { style: { fontSize: 11, opacity: 0.6 } }, "暂无消息。执行子代理开工时会在此声明要改的文件；你也可以发指令给它们。"),
+      h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+        h("input", { style: { ...input, flex: 1 }, placeholder: "给执行子代理发消息（如：优先改 src/a.ts，勿动 b.ts）", value: collabText, onChange: (e) => setCollabText(e.target.value) }),
+        h("button", {
+          style: btnPrimary, disabled: !!busy || !collabText.trim(),
+          onClick: () => post("collab", { action: "post", text: collabText, actor: "human:gui" }).then((d) => { if (d?.ok) { setCollabText(""); load(); } }),
+        }, "发送"),
+      ),
+    ),
     msg && h("div", { style: { color: "#e05a5a" } }, msg),
   );
 }
@@ -217,15 +379,17 @@ const AP_PROTECTED_VERSION_SLUGS = ["interaction", "deploy-test", "backend"];
 function isApProtectedVersion(slug) { return AP_PROTECTED_VERSION_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
 
 function apLaneShell(opts) {
-  const { key, title, count, collapsed, onToggle, onRefresh, refreshing, fullWidth, actions, hint, children } = opts;
+  const { key, title, count, collapsed, onToggle, onRefresh, refreshing, fullWidth, actions, hint, children, dropProps } = opts;
   const labelEl = h("div", {
     key: key + "-label",
     onClick: onToggle,
     title: hint,
+    ...(dropProps ?? {}),
     style: {
       padding: "5px 10px", borderRadius: 8, background: "rgba(128,128,128,.10)",
       display: "flex", flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap",
       minWidth: 0, cursor: "pointer", userSelect: "none",
+      ...(dropProps && dropProps._active ? { background: "rgba(76,141,255,.18)", outline: "1px dashed rgba(76,141,255,.6)" } : {}),
       ...(fullWidth || collapsed ? { gridColumn: "1 / -1" } : {}),
     },
   },
@@ -240,6 +404,7 @@ function apLaneShell(opts) {
   );
   const bodyEl = collapsed ? null : h("div", {
     key: key + "-body",
+    ...(dropProps ? { onDragOver: dropProps.onDragOver, onDrop: dropProps.onDrop } : {}),
     style: { gridColumn: fullWidth ? "1 / -1" : "2 / -1", display: "flex", flexDirection: "column", gap: 8, minWidth: 0, padding: "8px 10px", borderRadius: 8, background: "rgba(128,128,128,.04)" },
   }, ...(children ?? []));
   return h(React.Fragment, null, labelEl, bodyEl);
@@ -410,6 +575,39 @@ function TrashLane(props) {
   const [refreshing, setRefreshing] = React.useState(false);
   const [busy, setBusy] = React.useState("");
   const [msg, setMsg] = React.useState("");
+  const [purgePending, setPurgePending] = React.useState(null); // 二次确认键
+  const purgeTimer = React.useRef(null);
+  const [hover, setHover] = React.useState(false);
+
+  /** 两步确认：第一次点变成「确认彻底删除？」，3 秒内再点才真删 */
+  const purgeConfirm = (keyName, run) => {
+    if (purgePending !== keyName) {
+      setPurgePending(keyName);
+      if (purgeTimer.current) clearTimeout(purgeTimer.current);
+      purgeTimer.current = setTimeout(() => setPurgePending(null), 3000);
+      return;
+    }
+    if (purgeTimer.current) clearTimeout(purgeTimer.current);
+    setPurgePending(null);
+    run();
+  };
+
+  const purge = (body) => {
+    setBusy(JSON.stringify(body)); setMsg("");
+    fetch("/api/dsh-graph-autopilot/trash", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, ...body }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { setMsg("❌ " + (d?.error ?? "彻底删除失败")); return; }
+        setData({ goals: d.goals ?? [], versions: d.versions ?? [] });
+        setMsg("🗑 已彻底删除（不可恢复）");
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setBusy(""));
+  };
 
   const load = React.useCallback((silent) => {
     if (!workspace) return;
@@ -474,6 +672,11 @@ function TrashLane(props) {
           h("div", { style: { opacity: 0.6, fontSize: 11 } }, "移入时间：" + (v.moved_at || "—")),
           h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
             h("button", { style: AP_ROW_BTN, disabled: !!busy, onClick: () => restore({ action: "restore-version", dir: v.dir }) }, busy.indexOf(v.dir) >= 0 ? "…" : "↩ 恢复版本"),
+            h("button", {
+              style: { ...AP_ROW_BTN, color: "#e05a5a" }, disabled: !!busy,
+              title: "彻底删除（不可恢复，需点两次确认）",
+              onClick: () => purgeConfirm(`version:${v.dir}`, () => purge({ action: "purge-version", dir: v.dir, confirm: true })),
+            }, purgePending === `version:${v.dir}` ? "确认彻底删除？" : "🗑 彻底删除"),
           ),
         )))),
     data.goals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
@@ -481,7 +684,14 @@ function TrashLane(props) {
       h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 } },
         data.goals.map((g) => h("div", {
           key: g.id,
-          style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #6b7280", display: "flex", flexDirection: "column", gap: 4, fontSize: 12 },
+          draggable: true,
+          title: "拖到任意泳道 = 恢复并落到该泳道",
+          onDragStart: (e) => {
+            try { e.dataTransfer.setData("text/plain", "autopilot-trash:" + g.id); e.dataTransfer.effectAllowed = "copy"; } catch { /* 旧引擎 */ }
+            apDragStart("trash", g.id);
+          },
+          onDragEnd: () => apDragEnd(),
+          style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #6b7280", display: "flex", flexDirection: "column", gap: 4, fontSize: 12, cursor: "grab" },
         },
           h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
             h("b", null, g.title),
@@ -490,6 +700,11 @@ function TrashLane(props) {
           h("div", { style: { opacity: 0.6, fontSize: 11 } }, "来源：" + g.from),
           h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
             h("button", { style: AP_ROW_BTN, disabled: !!busy, onClick: () => restore({ action: "restore-goal", goal: g.id }) }, busy.indexOf(g.id) >= 0 ? "…" : "↩ 恢复目标"),
+            h("button", {
+              style: { ...AP_ROW_BTN, color: "#e05a5a" }, disabled: !!busy,
+              title: "彻底删除（不可恢复，需点两次确认）",
+              onClick: () => purgeConfirm(`goal:${g.id}`, () => purge({ action: "purge-goal", goal: g.id, confirm: true })),
+            }, purgePending === `goal:${g.id}` ? "确认彻底删除？" : "🗑 彻底删除"),
           ),
         )))),
     total === 0 && h("div", { key: "empty", style: { opacity: 0.6, fontSize: 12, padding: "6px 0" } }, "回收站是空的：被移除的版本泳道与已归档目标都会出现在这里，可随时恢复。"),
@@ -505,12 +720,28 @@ function TrashLane(props) {
     onRefresh: () => load(false),
     refreshing,
     fullWidth: !!props?.fullWidth,
-    hint: "可折叠（默认折叠，省位置）；展开后每 10 秒自动刷新；恢复已移除版本 / 已归档目标",
+    hint: "可折叠（默认折叠，省位置）；展开后每 10 秒自动刷新；把看板卡片拖进来=移入回收站，把回收站条目拖出去=恢复并落到该泳道",
+    // [v0.18] 承接看板卡片拖入（= 归档进回收站）；拖拽悬停时本行自动展开，方便落点
+    dropProps: props?.anyDrag ? {
+      _active: hover,
+      onDragOver: (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (collapsed) setCollapsed(false);
+        if (!hover) setHover(true);
+      },
+      onDrop: (e) => {
+        e.preventDefault();
+        setHover(false);
+        const gid = props?.dragGoalId;
+        if (gid && typeof props?.onDropCard === "function") props.onDropCard(gid);
+      },
+    } : undefined,
     children,
   });
 }
 
 >>>ESM-EXPORTS-START>>>
 // 仅 node --test / 静态检查用；浏览器 bundle 由 build-client.sh 剥离本块。
-export { AutopilotPanel, TemplateLane, TrashLane, apDragStart, apDragEnd, apAdoptIntoLane };
+export { AutopilotPanel, TemplateLane, TrashLane, apDragStart, apDragEnd, apAdoptIntoLane, apArchiveGoal };
 <<<ESM-EXPORTS-END<<<

@@ -24,6 +24,10 @@
       const [newGoalVersion, setNewGoalVersion] = React.useState("");
       const [newGoalDesc, setNewGoalDesc] = React.useState("");
       const [newGoalType, setNewGoalType] = React.useState("task"); // g-158
+      // [v0.18] 新建目标可选的技能 / Agent 预设（留空 = 派发时由执行 AI 自选）
+      const [newGoalSkills, setNewGoalSkills] = React.useState([]);
+      const [newGoalPreset, setNewGoalPreset] = React.useState("");
+      const [apCatalog, setApCatalog] = React.useState({ skills: [], presets: [] });
       // g-159: 记录打开弹窗时的入口版本；null 表示普通入口，需按当前 active 默认值重置
       const [createGoalEntryVersion, setCreateGoalEntryVersion] = React.useState(null);
       const [createGoalInitialized, setCreateGoalInitialized] = React.useState(false);
@@ -731,6 +735,21 @@
       React.useEffect(() => {
         load();
       }, [showArchived, props?.sessionId, activeWs]); // showArchived/sessionId/activeWs 变化时重新加载
+
+      // [v0.18] 技能 / Agent 预设目录：打开新建目标弹窗时按需拉取一次（失败静默降级为空列表）
+      React.useEffect(() => {
+        if (!showCreateGoal || !activeWs) return;
+        let alive = true;
+        fetch("/api/dsh-graph-autopilot/catalog", {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspace: activeWs }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => { if (alive && d?.ok) setApCatalog({ skills: d.skills ?? [], presets: d.presets ?? [] }); })
+          .catch(() => {});
+        return () => { alive = false; };
+      }, [showCreateGoal, activeWs]);
 
       // [autopilot-fork] 推荐/模板卡拖拽采纳（建目标）后立即强制刷新看板（跳过 304 复用，保证新目标上板）
       const loadFreshRef = React.useRef(load);
@@ -2189,7 +2208,13 @@
       }
       // [autopilot-fork] 模板行 + 回收站行：固定在看板最底部（两行都可折叠、默认折叠，展开时每 10s 实时刷新）
       rows.push(h(TemplateLane, { key: "tpl-lane", workspace: activeWs, fullWidth: singleColumnMode }));
-      rows.push(h(TrashLane, { key: "trash-lane", workspace: activeWs, fullWidth: singleColumnMode }));
+      rows.push(h(TrashLane, {
+        key: "trash-lane", workspace: activeWs, fullWidth: singleColumnMode,
+        // [v0.18] 承接看板卡片拖入 = 移入回收站
+        anyDrag: drag != null,
+        dragGoalId: drag?.goalId ?? null,
+        onDropCard: (id) => { setDrag(null); apArchiveGoal(id); },
+      }));
 
       // g-352：单版本模式不渲染 released 折叠区（判据 3：DOM 中仅存在选中版本一个泳道）。
       // g-366：搜索聚合泳道档同理不渲染 released 折叠区（命中若在已发布/已隐藏版本，由聚合泳道直接呈现）。
@@ -2258,6 +2283,9 @@
           if (newGoalDesc.trim()) body.description = newGoalDesc.trim();
           // g-158：新建目标类型透传（默认 task）
           body.type = normalizeGoalType(newGoalType);
+          // [v0.18] 选用技能 / Agent 预设（留空不传 = 派发时 AI 自选）
+          if (Array.isArray(newGoalSkills) && newGoalSkills.length) body.skill_refs = newGoalSkills;
+          if (newGoalPreset) body.preset = newGoalPreset;
           const r = await fetch(graphUrlForActive("/api/dsh-graph/create-goal"), {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -2269,6 +2297,8 @@
             setNewGoalTitle("");
             setNewGoalDesc("");
             setNewGoalType("task"); // g-158 重置为新目标默认类型
+            setNewGoalSkills([]);   // [v0.18] 重置技能/预设选择
+            setNewGoalPreset("");
             const latestActive = b.versions.find((v) => v.status === "active")?.slug ?? "";
             setNewGoalVersion(createGoalEntryVersion ?? latestActive);
             setCreateGoalInitialized(false);
@@ -3007,6 +3037,36 @@
                         title: GOAL_TYPE_LABELS[t],
                         onClick: () => setNewGoalType(t),
                       }, GOAL_TYPE_ABBREV[t], h("span", null, GOAL_TYPE_LABELS[t]))))),
+                // [v0.18] 选用技能 / Agent 预设（都不选 = 由执行 AI 按目标内容自行判断）
+                h("div", { style: { marginTop: 10 } },
+                  h("label", { style: { display: "block", marginBottom: 4, fontWeight: 600 } }, "选用技能（可多选，留空由 AI 自选）"),
+                  h("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, maxHeight: 96, overflow: "auto", padding: 4, border: "1px solid rgba(128,128,128,.25)", borderRadius: 6 } },
+                    (apCatalog.skills ?? []).length === 0
+                      ? h("span", { style: { ...S.meta, fontSize: 11 } }, "（未发现技能）")
+                      : (apCatalog.skills ?? []).map((s) => h("label", {
+                          key: s.name,
+                          title: (s.description || "") + (s.source ? " · " + s.source : ""),
+                          style: { display: "inline-flex", gap: 4, alignItems: "center", fontSize: 11, padding: "2px 6px", borderRadius: 5, background: newGoalSkills.includes(s.name) ? "rgba(76,141,255,.22)" : "rgba(128,128,128,.12)", cursor: "pointer" },
+                        },
+                          h("input", {
+                            type: "checkbox", checked: newGoalSkills.includes(s.name),
+                            onChange: (e) => setNewGoalSkills((prev) => e.target.checked ? [...prev, s.name] : prev.filter((x) => x !== s.name)),
+                          }),
+                          s.name,
+                        )),
+                  ),
+                ),
+                h("div", { style: { marginTop: 10 } },
+                  h("label", { style: { display: "block", marginBottom: 4, fontWeight: 600 } }, "Agent 预设（留空由 AI 按目标内容自选）"),
+                  h("select", {
+                    style: { ...S.promptInput, width: "100%" },
+                    value: newGoalPreset,
+                    onChange: (e) => setNewGoalPreset(e.target.value),
+                  },
+                    h("option", { value: "" }, "（不指定 · AI 自选）"),
+                    (apCatalog.presets ?? []).map((p) => h("option", { key: p.name, value: p.name }, p.name + (p.description ? " — " + p.description.slice(0, 40) : ""))),
+                  ),
+                ),
                 h("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
                   h("button", {
                     style: { ...S.btn, padding: "6px 16px", fontSize: 13 },

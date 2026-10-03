@@ -1566,7 +1566,7 @@ export function createGoal(
     created_by: opts.actor,
     version: isStandalone ? null : (opts.version ?? null),
     depends_on: [],
-    review: { reviewer: "human", prompt: null },
+    review: { reviewer: "ai", prompt: null },
     pk: { lanes: 1, sandbox: "directory" },
     rules_snapshot: null,
     skill_refs: [],

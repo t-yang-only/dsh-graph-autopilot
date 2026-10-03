@@ -174,6 +174,21 @@ import {
   listTrash,
   restoreRemovedVersion,
   isProtectedVersion,
+  setGoalExtras,
+  purgeRemovedVersion,
+  purgeArchivedGoal,
+  restoreGoalToLane,
+  listSkills,
+  listAgentPresets,
+  postCollab,
+  readCollab,
+  activeClaims,
+  checkClaimConflicts,
+  buildDeepScanPrompt,
+  buildManagerPrompt,
+  applyManagerResult,
+  DEFAULT_MANAGER_PROMPT,
+  resolveUserHome,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -3764,13 +3779,23 @@ export function apply(ctx, config) {
         try {
           if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
           const body = await readBody(req);
-          const { title, version, description, type } = body;
+          const { title, version, description, type, skill_refs, preset } = body;
           if (!title || typeof title !== "string" || !title.trim()) {
             return json(res, 400, { error: "missing title" });
           }
           const r = rootForReq(req, body);
           const goalId = createGoal(r, { title: title.trim(), version, description, type, actor: "human:gui" });
-          json(res, 200, { ok: true, goal: goalId });
+          // [v0.18] 选用技能 / Agent 预设（不选则留空：派发时由执行 AI 自行判断）
+          let extras = null;
+          try {
+            if ((Array.isArray(skill_refs) && skill_refs.length) || (preset != null && String(preset).trim())) {
+              extras = setGoalExtras(r, goalId, { skill_refs, preset, actor: "human:gui" });
+            }
+          } catch (e) {
+            // 扩展字段失败不回滚已建目标（目标本体已落盘），但要把原因透出
+            return json(res, 200, { ok: true, goal: goalId, extras_error: String(e?.message ?? e) });
+          }
+          json(res, 200, { ok: true, goal: goalId, extras });
         } catch (e) {
           const code = e instanceof GraphError ? 400 : 500;
           json(res, code, { error: String(e?.message ?? e) });
@@ -4352,6 +4377,8 @@ export function apply(ctx, config) {
       const sid = ex?.agent?.session?.id ?? ex?.agent?.id ?? null;
       return sid ? `agent:${sid}` : "agent:unknown";
     };
+    // [v0.18] 推荐管理员定时器轮询的 root 集合（去过的工作区自动登记，最多取前 5 个）
+    const apKnownRoots = new Set();
     const autopilotRoot = (ex, wsOverride) => {
       let ws = null;
       if (wsOverride && typeof wsOverride === "string" && wsOverride.trim()) ws = wsOverride.trim();
@@ -4363,6 +4390,7 @@ export function apply(ctx, config) {
       }
       const canonical = resolveCanonicalRoot(config, resolve(ws));
       init(canonical.root);
+      apKnownRoots.add(canonical.root); // [v0.18] 供推荐管理员定时器轮询
       return canonical.root;
     };
 
@@ -4445,10 +4473,32 @@ export function apply(ctx, config) {
       try { doc = loadGoal(findGoalFile(root, nextId)); } catch { /* 派发准入会给出权威错误 */ }
       const briefParts = [];
       if (st.globalPrompt) briefParts.push(`【全局提示词（最高优先级，必须遵循）】\n${st.globalPrompt}`);
-      if (st.autoPreset && doc) {
+      // [v0.18] 负责人指定的技能 / Agent 预设（手动选择优先）
+      const declaredSkills = Array.isArray(doc?.meta?.skill_refs) ? doc.meta.skill_refs : [];
+      if (declaredSkills.length) {
+        briefParts.push(`【本目标指定技能（必须加载并遵循）】\n${declaredSkills.map((s) => "- " + s).join("\n")}\n（技能入口：<HOME>/.dsh/skills/<name>/SKILL.md 或 <HOME>/.agents/skills/<name>/SKILL.md）`);
+      }
+      const pinnedPreset = doc?.meta?.agent_preset ? String(doc.meta.agent_preset) : "";
+      if (pinnedPreset) {
+        briefParts.push(`【本目标指定 Agent 预设】请按「${pinnedPreset}」预设的专业方法执行（负责人显式指定，优先于系统自动建议）。`);
+      }
+      if (st.autoPreset && doc && !pinnedPreset) {
         const preset = autoPresetFor(`${doc.meta.title ?? ""} ${doc.body ?? ""}`);
         if (preset) briefParts.push(`【执行方式建议】本任务适合参考「${preset}」预设的专业方法执行（系统自动分析推荐；如有更合适的方式可自行判断）。`);
       }
+      // [v0.18] 协作频道：注入近期消息 + 其它任务的资源声明（防冲突）
+      try {
+        const digest = readCollab(root, 10);
+        if (digest.length) {
+          briefParts.push(`【协作频道（近期消息，可用 graph_collab_post/read 继续沟通）】\n${digest.map((c) => `- ${c.at} ${c.actor}${c.goal ? " @ " + c.goal : ""}: ${c.text || (c.claims ?? []).join("、")}`).join("\n")}`);
+        }
+        const held = activeClaims(root).filter((c) => c.goal && c.goal !== nextId);
+        if (held.length) {
+          briefParts.push(`【当前被其它任务占用的资源（禁止改动，先协作）】\n${held.map((c) => `- ${c.goal}（${c.actor}）：${c.paths.join("、")}`).join("\n")}\n你若必须改动其中资源，先 graph_collab_post 说明并等待对方 release。改动前用 graph_collab_post 声明你要动的文件（claims），系统会拒绝与他人的冲突声明。`);
+        } else {
+          briefParts.push("【开工纪律】改动文件前用 graph_collab_post 声明你要动的文件（claims 参数），避免与并行任务冲突；收工用 graph_collab_post 发 kind=release 释放声明。");
+        }
+      } catch { /* 协作频道不可用不阻断派发 */ }
       const { supervisorId, parent } = resolveSpawnParent(root);
       try {
         const res = await dispatchExecutionAttempt({
@@ -4609,6 +4659,66 @@ export function apply(ctx, config) {
           const text = String(a.text ?? "").trim();
           const state = writeAutopilotState(root, { globalGoal: text ? { text, updatedAt: new Date().toISOString() } : null }, { actor: autopilotActor(ex) });
           return { ok: true, globalGoal: state.globalGoal };
+        },
+      },
+      // [v0.18] 完整扫描推荐的**回写口**（子代理分析完调用它落库）
+      saveRecommendations: {
+        name: "autopilot_save_recommendations",
+        description: "[autopilot] 回写完整扫描推荐结果（整表替换，自动去重）。由 deep-scan 子代理在分析完工作区与项目正式文件后调用。",
+        parameters: params({
+          recommendations: { type: "array", description: "推荐项数组：{title, type(feature|bug|task|improvement|patch|chore), description, criteria[], reason}" },
+          workspace: { type: "string" },
+        }, ["recommendations"]),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const out = applyManagerResult(root, { recommendations: a.recommendations }, autopilotActor(ex));
+          return { ok: true, ...out, recommendations: readRecommendations(root) };
+        },
+      },
+      // [v0.18] AI 推荐管理员的回写口（推荐 + 全局目标 + 全局提示词）
+      managerApply: {
+        name: "autopilot_manager_apply",
+        description: "[autopilot] 回写推荐管理员结果：推荐清单整表替换，可选维护全局目标/全局提示词（受 managerUpdateGlobals 开关约束）。",
+        parameters: params({
+          recommendations: { type: "array", description: "推荐项数组（可空）" },
+          globalGoal: { type: "string", description: "新的全局目标（不改则省略或传空）" },
+          globalPrompt: { type: "string", description: "新的全局提示词（不改则省略或传空）" },
+          notes: { type: "string", description: "给用户的简短说明" },
+          workspace: { type: "string" },
+        }, []),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const out = applyManagerResult(root, { recommendations: a.recommendations, globalGoal: a.globalGoal ?? null, globalPrompt: a.globalPrompt ?? null, notes: a.notes ?? null }, autopilotActor(ex));
+          const st = readAutopilotState(root);
+          return { ok: true, ...out, globalGoal: st.globalGoal, globalPrompt: st.globalPrompt, recommendations: readRecommendations(root) };
+        },
+      },
+      // [v0.18] 协作频道：任务间沟通 + 资源声明（冲突会被拒）
+      collabPost: {
+        name: "graph_collab_post",
+        description: "[协作] 在任务协作频道发消息；带 claims（要改动的文件路径数组）时会被登记为资源占用——与其它活跃任务重叠会被**拒绝**，需先沟通。收工用 kind=release 释放。",
+        parameters: params({
+          text: { type: "string", description: "消息内容（如：我在改 src/a.ts，请勿并发改）" },
+          claims: { type: "array", items: "string", description: "要声明的文件/路径（相对工作区）" },
+          goal: { type: "string", description: "目标 id（通常传当前目标）" },
+          kind: { type: "string", description: "note|claim|release（默认按是否带 claims 自动判定）" },
+          workspace: { type: "string" },
+        }, []),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          const conflicts = checkClaimConflicts(root, { goal: String(a.goal ?? ""), paths: a.claims });
+          if (conflicts.length) return { ok: false, conflict: true, conflicts, hint: "先 graph_collab_post 与占用方沟通，或等其 release" };
+          const out = postCollab(root, { actor: autopilotActor(ex), goal: a.goal ?? null, text: a.text, claims: a.claims, kind: a.kind });
+          return { ok: true, entry: out.entry };
+        },
+      },
+      collabRead: {
+        name: "graph_collab_read",
+        description: "[协作] 读取协作频道近期消息 + 当前活跃资源声明（谁在改哪些文件）。",
+        parameters: params({ limit: { type: "number", description: "条数，默认 30" }, workspace: { type: "string" } }, []),
+        run: (a, ex) => {
+          const root = autopilotRoot(ex, a.workspace);
+          return { ok: true, messages: readCollab(root, Number(a.limit) || 30), claims: activeClaims(root) };
         },
       },
     };
@@ -4787,19 +4897,160 @@ export function apply(ctx, config) {
             if (action === "list") return json(res, 200, { ok: true, ...listTrash(root) });
             if (action === "restore-goal") {
               if (!body.goal) return json(res, 400, { error: "missing goal" });
-              unarchiveGoal(root, String(body.goal), { actor: "human:gui" });
-              return json(res, 200, { ok: true, restored: String(body.goal), ...listTrash(root) });
+              // version 缺省=原地恢复；传版本 slug/standalone=恢复并落到该泳道（拖拽落点）
+              const r = restoreGoalToLane(root, String(body.goal), { version: body.version ?? undefined, actor: "human:gui" });
+              return json(res, 200, { ok: true, restored: r.id, version: r.version, ...listTrash(root) });
             }
             if (action === "restore-version") {
               if (!body.dir) return json(res, 400, { error: "missing dir" });
               const r = restoreRemovedVersion(root, String(body.dir), "human:gui");
               return json(res, 200, { ok: true, restored: r.slug, ...listTrash(root) });
             }
+            // [v0.18] 彻底删除（不可恢复）：必须显式 confirm=true
+            if (action === "purge-version" || action === "purge-goal") {
+              if (body.confirm !== true) return json(res, 400, { error: "彻底删除需要 confirm=true" });
+              if (action === "purge-version") {
+                if (!body.dir) return json(res, 400, { error: "missing dir" });
+                purgeRemovedVersion(root, String(body.dir), "human:gui");
+              } else {
+                if (!body.goal) return json(res, 400, { error: "missing goal" });
+                purgeArchivedGoal(root, String(body.goal), "human:gui");
+              }
+              return json(res, 200, { ok: true, ...listTrash(root) });
+            }
+            return json(res, 400, { error: `未知 action：${action}` });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      // [v0.18] 新建目标可选项：可用技能 + Agent 预设目录（不选 = 留空，派发时 AI 自选）
+      {
+        path: "/api/dsh-graph-autopilot/catalog",
+        handler: async (req, res) => {
+          try {
+            req.method === "POST" ? await readBody(req) : null;
+            const skills = listSkills();
+            const presets = listAgentPresets();
+            json(res, 200, { ok: true, home: resolveUserHome(), skills, presets });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      // [v0.18] 协作频道：任务间沟通 + 资源声明（防冲突）
+      {
+        path: "/api/dsh-graph-autopilot/collab",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const action = String(body.action ?? "list");
+            if (action === "list") {
+              return json(res, 200, { ok: true, messages: readCollab(root, Number(body.limit) || 50), claims: activeClaims(root) });
+            }
+            if (action === "post") {
+              // 冲突闸门：声明与其它活跃任务重叠时**拒绝**（要求先协作），防并发改同一批文件
+              const conflicts = checkClaimConflicts(root, { goal: String(body.goal ?? ""), paths: body.claims });
+              if (conflicts.length) {
+                return json(res, 409, { error: `资源声明冲突，已拒绝：${conflicts.join("；")}`, conflicts });
+              }
+              const out = postCollab(root, {
+                actor: String(body.actor ?? "human:gui"),
+                goal: body.goal ?? null,
+                text: body.text,
+                claims: body.claims,
+                kind: body.kind,
+              });
+              return json(res, 200, { ok: true, entry: out.entry, messages: readCollab(root, 50) });
+            }
+            return json(res, 400, { error: `未知 action：${action}` });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      // [v0.18] 完整扫描推荐：拉起子代理深度分析工作区与项目正式文件，再用 autopilot_save_recommendations 回写
+      {
+        path: "/api/dsh-graph-autopilot/deep-scan",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const ws = workspaceOf(req, body) ?? dirname(root);
+            const prompt = buildDeepScanPrompt(root, ws);
+            appendEvent(root, { actor: "human:gui", event: "autopilot.deep_scan_started", details: { workspace: ws } });
+            const spawned = await spawnChild("graph:deep-scan", prompt, req, root, { role: "pm" });
+            if (!spawned.childId) return json(res, 500, { error: spawned.error ?? "拉不起子代理" });
+            json(res, 200, { ok: true, child_id: spawned.childId, model_route: spawned.model_route });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      // [v0.18] AI 推荐管理员：独立上行文 + 实时管理推荐/全局目标/全局提示词
+      {
+        path: "/api/dsh-graph-autopilot/manager",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const action = String(body.action ?? "get");
+            if (action === "get") {
+              const st = readAutopilotState(root);
+              return json(res, 200, {
+                ok: true,
+                managerPrompt: st.managerPrompt,
+                defaultPrompt: DEFAULT_MANAGER_PROMPT,
+                managerEnabled: st.managerEnabled,
+                managerIntervalMin: st.managerIntervalMin,
+                managerLastRun: st.managerLastRun,
+                managerUpdateGlobals: st.managerUpdateGlobals,
+                globalGoal: st.globalGoal,
+                globalPrompt: st.globalPrompt,
+              });
+            }
+            if (action === "set") {
+              const patch = {};
+              if (typeof body.managerPrompt === "string" || body.managerPrompt === null) patch.managerPrompt = body.managerPrompt;
+              if (typeof body.managerEnabled === "boolean") patch.managerEnabled = body.managerEnabled;
+              if (Number.isFinite(Number(body.managerIntervalMin)) && Number(body.managerIntervalMin) >= 1) {
+                patch.managerIntervalMin = Math.min(24 * 60, Math.round(Number(body.managerIntervalMin)));
+              }
+              if (typeof body.managerUpdateGlobals === "boolean") patch.managerUpdateGlobals = body.managerUpdateGlobals;
+              // 评审模式也走这里（机审=auto 默认 / 人审=human）
+              if (body.reviewMode === "auto" || body.reviewMode === "human") patch.reviewMode = body.reviewMode;
+              const st = writeAutopilotState(root, patch, { actor: "human:gui" });
+              return json(res, 200, { ok: true, managerPrompt: st.managerPrompt, managerEnabled: st.managerEnabled, managerIntervalMin: st.managerIntervalMin, managerUpdateGlobals: st.managerUpdateGlobals, reviewMode: st.reviewMode });
+            }
+            if (action === "run") {
+              const ws = workspaceOf(req, body) ?? dirname(root);
+              const prompt = buildManagerPrompt(root, ws);
+              appendEvent(root, { actor: "human:gui", event: "autopilot.manager_run_started", details: { workspace: ws } });
+              const spawned = await spawnChild("graph:rec-manager", prompt, req, root, { role: "pm" });
+              if (!spawned.childId) return json(res, 500, { error: spawned.error ?? "拉不起子代理" });
+              return json(res, 200, { ok: true, child_id: spawned.childId, model_route: spawned.model_route });
+            }
             return json(res, 400, { error: `未知 action：${action}` });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },
       },
     ];
+
+    // [v0.18] 推荐管理员定时器：启用后每 managerIntervalMin 分钟自动跑一次（每 60s 检查一次到期）
+    // 每次只派一个子代理；lastRun 立即写入避免堆积。定时器内**绝不抛错**（不能拖垮宿主）。
+    const autopilotManagerTimer = setInterval(() => {
+      for (const r of [...apKnownRoots].slice(0, 5)) {
+        try {
+          const st = readAutopilotState(r);
+          if (!st.managerEnabled) continue;
+          const last = st.managerLastRun ? Date.parse(st.managerLastRun) : 0;
+          const intervalMs = Math.max(1, Number(st.managerIntervalMin) || 30) * 60_000;
+          if (Number.isFinite(last) && Date.now() - last < intervalMs) continue;
+          const ws = dirname(r);
+          const prompt = buildManagerPrompt(r, ws);
+          writeAutopilotState(r, { managerLastRun: new Date().toISOString() }, { actor: "system:autopilot" });
+          appendEvent(r, { actor: "system:autopilot", event: "autopilot.manager_run_started", details: { workspace: ws, auto: true } });
+          void spawnChild("graph:rec-manager(auto)", prompt, { on: () => {} }, r, { role: "pm" });
+        } catch { /* 定时任务失败静默，下一轮再试 */ }
+      }
+    }, 60_000);
+    if (autopilotManagerTimer.unref) autopilotManagerTimer.unref();
 
     // webServer 由 web-app 行提供，可能在 apply 之后才激活：轮询注册（同参考实现）。
     const routeState = { registered: false, timer: null };
@@ -4853,6 +5104,7 @@ export function apply(ctx, config) {
       invalidateBoardCache();
       if (routeState.timer) clearTimeout(routeState.timer);
       if (sectionState.timer) clearTimeout(sectionState.timer);
+      if (autopilotManagerTimer) clearInterval(autopilotManagerTimer);
       disposers.forEach((d) => d());
     };
   });

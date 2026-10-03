@@ -12,11 +12,12 @@
  * 归档复用内置 archiveGoal/unarchiveGoal（versions/vX/archived/…），本模块只补 listArchived。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendEvent, readEvents } from "./events.ts";
-import { createGoal, findGoalFile, loadGoal, setCriteria, normalizeGoalType, GraphError } from "./ops.ts";
+import { createGoal, findGoalFile, loadGoal, saveGoal, setCriteria, moveGoal, unarchiveGoal, normalizeGoalType, GraphError } from "./ops.ts";
 
 export const AUTOPILOT_STATE_FILE = "autopilot.json";
 export const RECOMMENDATIONS_FILE = "autopilot-recommendations.json";
@@ -31,8 +32,18 @@ export interface AutopilotState {
   globalGoal: { text: string; updatedAt: string } | null;
   /** 初始执行子 AI 是否按任务分析自动选择 Agent 预设（手动选择时以手动为准）。 */
   autoPreset: boolean;
-  /** 评审模式：auto = 机器门禁后自动裁决（automation=ai）；human = 停在 review 等人。 */
+  /** 评审模式：auto = 机器门禁后自动裁决（automation=ai）；human = 停在 review 等人。**默认 auto（机审）**。 */
   reviewMode: "auto" | "human";
+  /** [v0.18] 推荐管理员的**独立上行文**（为空时用内置默认上行文）。 */
+  managerPrompt: string | null;
+  /** [v0.18] 推荐管理员是否启用（实时/定时管理推荐）。 */
+  managerEnabled: boolean;
+  /** [v0.18] 管理轮询间隔（分钟）。 */
+  managerIntervalMin: number;
+  /** [v0.18] 上次管理运行时间（ISO）。 */
+  managerLastRun: string | null;
+  /** [v0.18] 允许管理员顺带维护全局目标 / 全局提示词。 */
+  managerUpdateGlobals: boolean;
 }
 
 const DEFAULT_STATE: AutopilotState = {
@@ -40,6 +51,11 @@ const DEFAULT_STATE: AutopilotState = {
   globalGoal: null,
   autoPreset: true,
   reviewMode: "auto",
+  managerPrompt: null,
+  managerEnabled: false,
+  managerIntervalMin: 30,
+  managerLastRun: null,
+  managerUpdateGlobals: true,
 };
 
 export function readAutopilotState(root: string): AutopilotState {
@@ -679,4 +695,476 @@ export function restoreRemovedVersion(root: string, dir: string, actor: string):
 
 export function listTrash(root: string): { goals: { id: string; title: string; from: string }[]; versions: RemovedVersion[] } {
   return { goals: listArchived(root), versions: listRemovedVersions(root) };
+}
+
+// ---------------------------------------------------------------------------
+// [v0.18] 目标扩展字段：选用技能 / Agent 预设（不选 = 空，派发时由 AI 自选）
+// ---------------------------------------------------------------------------
+export function setGoalExtras(
+  root: string,
+  id: string,
+  extras: { skill_refs?: string[]; preset?: string | null; actor: string },
+): { ok: true; skill_refs: string[]; preset: string | null } {
+  const file = findGoalFile(root, id);
+  const doc = loadGoal(file);
+  const refs = Array.isArray(extras.skill_refs)
+    ? extras.skill_refs.map((s) => String(s).trim()).filter(Boolean).slice(0, 20)
+    : Array.isArray(doc.meta.skill_refs) ? doc.meta.skill_refs as string[] : [];
+  const preset = extras.preset == null ? null : String(extras.preset).trim() || null;
+  doc.meta.skill_refs = refs;
+  doc.meta.agent_preset = preset;
+  saveGoal(file, doc);
+  appendEvent(root, {
+    actor: extras.actor,
+    event: "autopilot.goal_extras_set",
+    details: { goal: id, skills: refs, preset },
+  });
+  return { ok: true, skill_refs: refs, preset };
+}
+
+// ---------------------------------------------------------------------------
+// [v0.18] 回收站：彻底删除（不可恢复）+ 恢复并落到指定泳道
+// ---------------------------------------------------------------------------
+export function purgeRemovedVersion(root: string, dir: string, actor: string): { ok: true; dir: string } {
+  const base = String(dir ?? "").trim();
+  if (!base || base.includes("/") || base.includes("\\") || base === "." || base === "..") {
+    throw new GraphError(`非法回收站条目：${dir}`);
+  }
+  const target = join(root, TRASH_DIR, base);
+  if (!existsSync(target)) throw new GraphError(`回收站中不存在：${base}`);
+  rmSync(target, { recursive: true, force: true });
+  appendEvent(root, { actor, event: "autopilot.trash_purged", details: { kind: "version", dir: base } });
+  return { ok: true, dir: base };
+}
+
+/** 彻底删除已归档目标（定位方式与 listArchived 的 from 语义一致）。 */
+export function purgeArchivedGoal(root: string, id: string, actor: string): { ok: true; id: string } {
+  const gid = String(id ?? "").trim();
+  if (!gid || gid.includes("/") || gid.includes("\\") || gid === "." || gid === "..") {
+    throw new GraphError(`非法目标 id：${id}`);
+  }
+  const hit = listArchived(root).find((g) => g.id === gid);
+  if (!hit) throw new GraphError(`回收站中不存在已归档目标：${gid}`);
+  const parts = String(hit.from).replace(/\\/g, "/").split("/");
+  // from 形如 versions/<v>/archived/<id> | goals/archived/<id> | backlog/archived/<file>.md
+  let target: string | null = null;
+  if (parts[0] === "versions" && parts[2] === "archived") target = join(root, "versions", parts[1], "archived", parts[3]);
+  else if (parts[0] === "goals" && parts[1] === "archived") target = join(root, "goals", "archived", parts[2]);
+  else if (parts[0] === "backlog" && parts[1] === "archived") target = join(root, "backlog", "archived", parts[2]);
+  if (!target || !existsSync(target)) throw new GraphError(`无法定位归档实体：${hit.from}`);
+  rmSync(target, { recursive: true, force: true });
+  appendEvent(root, { actor, event: "autopilot.trash_purged", details: { kind: "goal", id: gid, from: hit.from } });
+  return { ok: true, id: gid };
+}
+
+/**
+ * 恢复已归档目标并（可选）移动到指定泳道：先把目标从归档取回原泳道，再 moveGoal 到目标泳道。
+ * version 语义同 createGoal：null/undefined = 原地恢复；"standalone" = 独立目标；其它 = 该版本。
+ */
+export function restoreGoalToLane(
+  root: string,
+  id: string,
+  opts: { version?: string | null; actor: string },
+): { ok: true; id: string; version: string | null } {
+  const gid = String(id ?? "").trim();
+  if (!gid) throw new GraphError("missing goal");
+  unarchiveGoal(root, gid, { actor: opts.actor });
+  const want = opts.version === undefined ? null : opts.version;
+  if (want) {
+    const cur = loadGoal(findGoalFile(root, gid)).meta.version ?? null;
+    if (want === "standalone") {
+      if (cur !== null) moveGoal(root, gid, { to: "standalone", actor: opts.actor });
+    } else if (cur !== want) {
+      moveGoal(root, gid, { to: "version", version: want, actor: opts.actor });
+    }
+  }
+  const after = loadGoal(findGoalFile(root, gid)).meta.version ?? null;
+  return { ok: true, id: gid, version: after };
+}
+
+// ---------------------------------------------------------------------------
+// [v0.18] 技能 / Agent 预设目录（新建目标时可选用；不选则 AI 自选）
+// ---------------------------------------------------------------------------
+export interface CatalogEntry { name: string; description: string; source: string; }
+
+/**
+ * 用户主目录解析（多级兜底）：显式参数 → USERPROFILE → HOME → os.homedir()。
+ * 实测坑：DSH 宿主进程里 process.env.USERPROFILE 可能为空，只读它会导致技能/预设目录扫描全空。
+ */
+export function resolveUserHome(homeDir?: string | null): string {
+  const explicit = String(homeDir ?? "").trim();
+  if (explicit) return explicit;
+  const envHome = String(process.env.USERPROFILE ?? "").trim() || String(process.env.HOME ?? "").trim();
+  if (envHome) return envHome;
+  try {
+    return homedir();
+  } catch {
+    return "";
+  }
+}
+
+function readSkillMeta(file: string, fallbackName: string, source: string): CatalogEntry | null {
+  try {
+    const raw = readFileSync(file, "utf8").slice(0, 4000);
+    const fm = raw.match(/^---\s*\n([\s\S]*?)\n---/);
+    let name = fallbackName;
+    let description = "";
+    if (fm) {
+      const n = fm[1].match(/^\s*name:\s*(.+)$/m);
+      const d = fm[1].match(/^\s*description:\s*(.+)$/m);
+      if (n) name = n[1].trim().replace(/^["']|["']$/g, "");
+      if (d) description = d[1].trim().replace(/^["']|["']$/g, "");
+    }
+    if (!description) {
+      const line = raw.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#") && !l.startsWith("---") && !l.includes(":"));
+      description = (line ?? "").slice(0, 160);
+    }
+    return { name, description: description.slice(0, 200), source };
+  } catch {
+    return null;
+  }
+}
+
+/** 扫描 DSH 技能：<home>/.dsh/skills/* 与 <home>/.agents/skills/*（SKILL.md 为入口）。 */
+export function listSkills(homeDir?: string | null): CatalogEntry[] {
+  const home = resolveUserHome(homeDir);
+  if (!home) return [];
+  const out: CatalogEntry[] = [];
+  const roots: [string, string][] = [
+    [join(home, ".dsh", "skills"), "dsh"],
+    [join(home, ".agents", "skills"), "agents"],
+  ];
+  for (const [dir, source] of roots) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      const entry = join(dir, name);
+      const skillFile = join(entry, "SKILL.md");
+      if (existsSync(skillFile)) {
+        const meta = readSkillMeta(skillFile, name, source);
+        if (meta) out.push(meta);
+      }
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 扫描 Agent 预设：<home>/.dsh/.agent-presets/*（目录或 .md 文件）。 */
+export function listAgentPresets(homeDir?: string | null): CatalogEntry[] {
+  const home = resolveUserHome(homeDir);
+  if (!home) return [];
+  const dir = join(home, ".dsh", ".agent-presets");
+  if (!existsSync(dir)) return [];
+  const out: CatalogEntry[] = [];
+  for (const name of readdirSync(dir)) {
+    const entry = join(dir, name);
+    let meta: CatalogEntry | null = null;
+    try {
+      if (statSync(entry).isDirectory()) {
+        for (const f of ["AGENTS.md", "PRESET.md", "README.md", "prompt.md"]) {
+          const p = join(entry, f);
+          if (existsSync(p)) { meta = readSkillMeta(p, name, "preset"); break; }
+        }
+        if (!meta) meta = { name, description: "", source: "preset" };
+      } else if (name.toLowerCase().endsWith(".md")) {
+        meta = readSkillMeta(entry, name.replace(/\.md$/i, ""), "preset");
+      }
+    } catch { /* 跳过异常项 */ }
+    if (meta) out.push(meta);
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ---------------------------------------------------------------------------
+// [v0.18] 子任务协作频道 + 资源声明互斥（防冲突）
+// ---------------------------------------------------------------------------
+export const COLLAB_FILE = "autopilot-collab.jsonl";
+
+export interface CollabEntry {
+  at: string;
+  actor: string;
+  goal: string | null;
+  text: string;
+  claims?: string[];
+  kind: "note" | "claim" | "release";
+}
+
+export function postCollab(
+  root: string,
+  input: { actor: string; goal?: string | null; text?: string; claims?: string[]; kind?: CollabEntry["kind"] },
+  opts?: { maxKeep?: number },
+): { ok: true; entry: CollabEntry } {
+  const text = String(input.text ?? "").trim();
+  const claims = Array.isArray(input.claims)
+    ? input.claims.map((c) => String(c).trim()).filter(Boolean).slice(0, 40)
+    : undefined;
+  if (!text && (!claims || claims.length === 0)) throw new GraphError("协作消息需要 text 或 claims 至少其一");
+  const entry: CollabEntry = {
+    at: new Date().toISOString(),
+    actor: String(input.actor ?? "unknown"),
+    goal: input.goal ? String(input.goal) : null,
+    text: text.slice(0, 2000),
+    ...(claims && claims.length ? { claims } : {}),
+    kind: input.kind ?? (claims && claims.length ? "claim" : "note"),
+  };
+  mkdirSync(root, { recursive: true });
+  const file = join(root, COLLAB_FILE);
+  writeFileSync(file, JSON.stringify(entry) + "\n", { encoding: "utf8", flag: "a" });
+  // 只保留最近 maxKeep 条，避免无限增长（默认 500）
+  const maxKeep = opts?.maxKeep ?? 500;
+  try {
+    const all = readFileSync(file, "utf8").split("\n").filter(Boolean);
+    if (all.length > maxKeep) writeFileSync(file, all.slice(-maxKeep).join("\n") + "\n", "utf8");
+  } catch { /* 截断失败不影响写入 */ }
+  appendEvent(root, { actor: entry.actor, event: "autopilot.collab_posted", details: { kind: entry.kind, goal: entry.goal, claims: entry.claims ?? [] } });
+  return { ok: true, entry };
+}
+
+export function readCollab(root: string, limit = 50): CollabEntry[] {
+  const file = join(root, COLLAB_FILE);
+  if (!existsSync(file)) return [];
+  try {
+    const lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
+    const out: CollabEntry[] = [];
+    for (const l of lines.slice(-Math.max(1, limit))) {
+      try { out.push(JSON.parse(l)); } catch { /* 跳过坏行 */ }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** 活跃声明：最近 windowMin 分钟内的 claim，**按时间顺序**处理 release（release 只作废它之前的声明）。 */
+export function activeClaims(root: string, windowMin = 120): { goal: string | null; actor: string; paths: string[]; at: string }[] {
+  const cutoff = Date.now() - windowMin * 60_000;
+  const live: { goal: string | null; actor: string; paths: string[]; at: string }[] = [];
+  for (const e of readCollab(root, 500)) {
+    const t = Date.parse(e.at ?? "");
+    if (!Number.isFinite(t) || t < cutoff) continue;
+    if (!e.goal) continue;
+    // release：只撤掉该目标**此前**的声明（不能永久屏蔽该目标后续的新声明）
+    if (e.kind === "release") {
+      for (let i = live.length - 1; i >= 0; i--) if (live[i].goal === e.goal) live.splice(i, 1);
+      continue;
+    }
+    if (e.claims && e.claims.length) live.push({ goal: e.goal, actor: e.actor, paths: e.claims, at: e.at });
+  }
+  return live;
+}
+
+/**
+ * 派发前冲突检查：同一路径被**其它目标**声明且仍在窗口内 → 返回冲突描述（阻止并发改同一批文件）。
+ * 自己的声明不算冲突（同一 target 重复派发由执行器串行化保证）。
+ */
+export function checkClaimConflicts(
+  root: string,
+  opts: { goal: string; paths?: string[]; windowMin?: number },
+): string[] {
+  const mine = String(opts.goal ?? "");
+  const targets = new Set((opts.paths ?? []).map((p) => String(p).replace(/\\/g, "/").replace(/^\.\//, "").trim()).filter(Boolean));
+  if (targets.size === 0) return [];
+  const conflicts: string[] = [];
+  for (const c of activeClaims(root, opts.windowMin ?? 120)) {
+    if (!c.goal || c.goal === mine) continue;
+    const hit = c.paths.map((p) => String(p).replace(/\\/g, "/").replace(/^\.\//, "").trim()).filter((p) => targets.has(p));
+    if (hit.length) conflicts.push(`${c.goal}（${c.actor}）已声明：${hit.join("、")}`);
+  }
+  return conflicts;
+}
+
+// ---------------------------------------------------------------------------
+// [v0.18] 完整扫描推荐 / AI 推荐管理员（上行文 + 结果落库）
+// ---------------------------------------------------------------------------
+export const DEFAULT_MANAGER_PROMPT = [
+  "你是看板「推荐线」的常驻管理员（AI），对该工作区负全责。",
+  "职责：",
+  "1. 维护推荐清单：只保留真正值得做、彼此不重复、与全局目标一致的任务；合并重复项、淘汰已过时项。",
+  "2. 维护全局目标：若现状与用户目标漂移，给出更准确的全局目标表述。",
+  "3. 维护全局提示词：把用户反复强调的约束沉淀为全局提示词（供所有执行/推荐子 AI 遵循）。",
+  "4. 与已存在目标去重：已在看板上的任务不得重复推荐。",
+  "输出要求：只输出一个 JSON 对象，字段：recommendations[]（每项 title/type/description/criteria[]/reason）、globalGoal（字符串或 null）、globalPrompt（字符串或 null）、notes（给用户看的简短说明）。",
+].join("\n");
+
+/** 收集工作区客观信号（文件树 + 正式文件抽样 + git + 全局锚点），供深度扫描/管理员使用。 */
+export function collectWorkspaceDigest(root: string, workspace: string, opts?: { maxFiles?: number }): string {
+  const maxFiles = opts?.maxFiles ?? 120;
+  const parts: string[] = [];
+  const st = readAutopilotState(root);
+  parts.push(`# 工作区\n${workspace}`);
+  if (st.globalGoal?.text) parts.push(`# 全局目标\n${st.globalGoal.text}`);
+  if (st.globalPrompt) parts.push(`# 全局提示词\n${st.globalPrompt}`);
+
+  // 1. 正式文件抽样：README / 文档 / 构建与配置（这些是「项目的正式文件」）
+  const formalNames = ["README.md", "README.MD", "AGENTS.md", "CLAUDE.md", "package.json", "pnpm-workspace.yaml", "go.mod", "Cargo.toml", "pyproject.toml", "Makefile", "docker-compose.yml"];
+  const formal: string[] = [];
+  for (const n of formalNames) {
+    const p = join(workspace, n);
+    if (existsSync(p)) {
+      try { formal.push(`## ${n}\n${readFileSync(p, "utf8").slice(0, 1800)}`); } catch { /* 跳过 */ }
+    }
+  }
+  if (formal.length) parts.push(`# 项目正式文件（抽样）\n${formal.join("\n\n")}`);
+
+  // 2. 文件树（限深限宽，忽略重目录）
+  const IGNORE = new Set(["node_modules", ".git", "dist", "build", ".next", "target", "__pycache__", ".venv", "venv", ".idea", ".vscode"]);
+  const tree: string[] = [];
+  const walk = (dir: string, prefix: string, depth: number) => {
+    if (tree.length >= maxFiles || depth > 3) return;
+    let entries: string[] = [];
+    try { entries = readdirSync(dir).filter((n) => !IGNORE.has(n) && !n.startsWith(".")); } catch { return; }
+    for (const n of entries) {
+      if (tree.length >= maxFiles) return;
+      const full = join(dir, n);
+      let isDir = false;
+      try { isDir = statSync(full).isDirectory(); } catch { continue; }
+      tree.push(`${prefix}${n}${isDir ? "/" : ""}`);
+      if (isDir) walk(full, `${prefix}${n}/`, depth + 1);
+    }
+  };
+  walk(workspace, "", 1);
+  if (tree.length) parts.push(`# 文件树（限 ${maxFiles} 项）\n${tree.join("\n")}`);
+
+  // 3. git 近况
+  try {
+    const log = execFileSync("git", ["-C", workspace, "log", "--oneline", "-20"], { encoding: "utf8", timeout: 8000 }).trim();
+    if (log) parts.push(`# 最近提交\n${log}`);
+    const status = execFileSync("git", ["-C", workspace, "status", "--porcelain"], { encoding: "utf8", timeout: 8000 }).trim();
+    if (status) parts.push(`# 未提交改动\n${status.slice(0, 2000)}`);
+  } catch { /* 非 git 仓库 */ }
+
+  // 4. 已在看板上的目标（去重锚点）
+  const existing = scanExistingTitles(root);
+  if (existing.length) parts.push(`# 看板上已存在的目标（禁止重复推荐）\n${existing.join("\n")}`);
+
+  return parts.join("\n\n");
+}
+
+function scanExistingTitles(root: string): string[] {
+  const out: string[] = [];
+  const push = (file: string, tag: string) => {
+    try {
+      const doc = loadGoal(file);
+      out.push(`- [${tag}] ${doc.meta.title ?? ""}（${doc.meta.status ?? ""}）`);
+    } catch { /* 跳过 */ }
+  };
+  const versionsDir = join(root, "versions");
+  if (existsSync(versionsDir)) {
+    for (const v of readdirSync(versionsDir)) {
+      const gd = join(versionsDir, v, "goals");
+      if (!existsSync(gd)) continue;
+      for (const id of readdirSync(gd)) {
+        const f = join(gd, id, "goal.md");
+        if (existsSync(f)) push(f, v);
+      }
+    }
+  }
+  const sd = join(root, "goals");
+  if (existsSync(sd)) {
+    for (const id of readdirSync(sd)) {
+      if (id === "archived") continue;
+      const f = join(sd, id, "goal.md");
+      if (existsSync(f)) push(f, "独立");
+    }
+  }
+  const bd = join(root, "backlog");
+  if (existsSync(bd)) {
+    for (const n of readdirSync(bd)) {
+      if (!n.endsWith(".md")) continue;
+      push(join(bd, n), "草稿");
+    }
+  }
+  return out;
+}
+
+export function buildDeepScanPrompt(root: string, workspace: string): string {
+  return [
+    "你是 dsh-graph 看板的「完整扫描推荐」分析师。请对下面这个工作区做一次**深度分析**并给出可执行的任务推荐。",
+    "",
+    "分析要求：",
+    "1. 读「项目正式文件」（README/构建配置/规范文档）判断项目目标与当前阶段；",
+    "2. 结合文件树、最近提交、未提交改动，找出**真正值得做**的缺口（未完成功能、明显缺陷、缺失的测试/文档/部署步骤、明显技术债）；",
+    "3. 与「看板上已存在的目标」逐条去重 —— 已存在的绝不重复推荐；",
+    "4. 每条推荐要具体到可执行（含验收判据），不要写「优化代码」这类空话；",
+    "5. 只输出 5-12 条，按价值排序。",
+    "",
+    "输出：**调用 autopilot_save_recommendations 工具**回写结果（不要只在回复里输出 JSON），参数 recommendations 为数组，每项 {title, type(feature|bug|task|improvement|patch|chore), description, criteria[], reason}。",
+    "",
+    collectWorkspaceDigest(root, workspace),
+  ].join("\n");
+}
+
+export function buildManagerPrompt(root: string, workspace: string): string {
+  const st = readAutopilotState(root);
+  const recs = readRecommendations(root);
+  const collab = readCollab(root, 20);
+  return [
+    "【上行文（管理员职责说明）】",
+    st.managerPrompt?.trim() || DEFAULT_MANAGER_PROMPT,
+    "",
+    "【当前推荐清单】",
+    recs.length ? recs.map((r, i) => `${i + 1}. [${r.type}] ${r.title} — ${r.description ?? ""}`).join("\n") : "（空）",
+    "",
+    "【最近协作频道消息】",
+    collab.length ? collab.map((c) => `- ${c.at} ${c.actor}${c.goal ? " @ " + c.goal : ""}: ${c.text || (c.claims ?? []).join(",")}`).join("\n") : "（空）",
+    "",
+    st.managerUpdateGlobals
+      ? "允许你同时给出 globalGoal / globalPrompt 的更新（仅在确有改进时给出，否则置 null）。"
+      : "本次**不要**改动 globalGoal / globalPrompt（保持 null）。",
+    "",
+    "输出：**调用 autopilot_manager_apply 工具**回写结果（recommendations[]、globalGoal、globalPrompt、notes）。",
+    "",
+    collectWorkspaceDigest(root, workspace, { maxFiles: 80 }),
+  ].join("\n");
+}
+
+/** 管理员结果落库：推荐整表替换（去重）+ 可选维护全局目标/提示词。 */
+export function applyManagerResult(
+  root: string,
+  input: { recommendations?: any[]; globalGoal?: string | null; globalPrompt?: string | null; notes?: string | null },
+  actor: string,
+): { recommendations: number; globalGoalUpdated: boolean; globalPromptUpdated: boolean } {
+  const st = readAutopilotState(root);
+  let recCount = 0;
+  if (Array.isArray(input.recommendations)) {
+    const cleaned: Recommendation[] = [];
+    const seen = new Set<string>();
+    for (const r of input.recommendations) {
+      const title = String(r?.title ?? "").trim();
+      if (!title) continue;
+      const key = normalizeTitle(title);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cleaned.push({
+        title,
+        type: normalizeGoalType(r?.type),
+        description: String(r?.description ?? "").trim(),
+        criteria: Array.isArray(r?.criteria) ? r.criteria.map((c: any) => String(c)).filter((c: string) => c.trim()) : [],
+        reason: String(r?.reason ?? "AI 管理员维护").slice(0, 200),
+        score: Number.isFinite(Number(r?.score)) ? Number(r.score) : 0,
+      });
+    }
+    saveRecommendations(root, cleaned, { actor });
+    recCount = cleaned.length;
+  }
+  let goalUpdated = false;
+  let promptUpdated = false;
+  if (st.managerUpdateGlobals) {
+    const g = typeof input.globalGoal === "string" ? input.globalGoal.trim() : "";
+    if (g && g !== (st.globalGoal?.text ?? "")) {
+      writeAutopilotState(root, { globalGoal: { text: g, updatedAt: new Date().toISOString() } }, { actor });
+      goalUpdated = true;
+    }
+    const p = typeof input.globalPrompt === "string" ? input.globalPrompt.trim() : "";
+    if (p && p !== (st.globalPrompt ?? "")) {
+      writeAutopilotState(root, { globalPrompt: p }, { actor });
+      promptUpdated = true;
+    }
+  }
+  writeAutopilotState(root, { managerLastRun: new Date().toISOString() }, { actor });
+  appendEvent(root, {
+    actor,
+    event: "autopilot.manager_applied",
+    details: { recommendations: recCount, globalGoalUpdated: goalUpdated, globalPromptUpdated: promptUpdated, notes: String(input.notes ?? "").slice(0, 200) },
+  });
+  return { recommendations: recCount, globalGoalUpdated: goalUpdated, globalPromptUpdated: promptUpdated };
 }

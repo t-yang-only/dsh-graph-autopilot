@@ -134,7 +134,8 @@ test("boardProjection：版本/独立/backlog + status_line 投影", async () =>
   const b = boardProjection(root);
   assert.equal(b.versions.length, 1);
   assert.equal(b.versions[0].goals[0].status_line, "正在写投影");
-  assert.equal(b.versions[0].goals[0].reviewer, "human");
+  // [autopilot-fork v0.18] 新建目标默认评审人 = ai（机审；负责人 2026-10-03 指定默认机审）
+  assert.equal(b.versions[0].goals[0].reviewer, "ai");
   assert.equal(b.backlog.length, 1);
   assert.equal(b.standalone.length, 0);
 });
