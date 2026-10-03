@@ -171,6 +171,9 @@ import {
   saveTemplate,
   deleteTemplate,
   applyTemplate,
+  listTrash,
+  restoreRemovedVersion,
+  isProtectedVersion,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -4069,6 +4072,10 @@ export function apply(ctx, config) {
           if (!slug || typeof slug !== "string" || !slug.trim()) {
             return json(res, 400, { error: "missing slug" });
           }
+          // [autopilot-fork] 固定分组与「独立目标」同属性：不可删除（唯一事实来源在 core/autopilot.ts）
+          if (isProtectedVersion(slug)) {
+            return json(res, 400, { error: `「${slug.trim()}」是固定分组，与独立目标同属性，不可删除` });
+          }
           const r = rootForReq(req, body);
           const result = deleteVersion(r, { slug: slug.trim(), actor: "human:gui" });
           json(res, 200, { ok: true, ...result });
@@ -4765,6 +4772,30 @@ export function apply(ctx, config) {
             let runRes = null;
             if (body.run === true && body.version && body.version !== "standalone") runRes = autopilotStart(root, body.version, body.review_mode, "human:gui");
             json(res, 200, { ok: true, ...out, run: runRes });
+          } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
+        },
+      },
+      // [autopilot-fork] 回收站行：list / restore-goal（取消归档）/ restore-version（移回 versions/）
+      {
+        path: "/api/dsh-graph-autopilot/trash",
+        handler: async (req, res) => {
+          try {
+            if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
+            const body = await readBody(req);
+            const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
+            const action = String(body.action ?? "list");
+            if (action === "list") return json(res, 200, { ok: true, ...listTrash(root) });
+            if (action === "restore-goal") {
+              if (!body.goal) return json(res, 400, { error: "missing goal" });
+              unarchiveGoal(root, String(body.goal), { actor: "human:gui" });
+              return json(res, 200, { ok: true, restored: String(body.goal), ...listTrash(root) });
+            }
+            if (action === "restore-version") {
+              if (!body.dir) return json(res, 400, { error: "missing dir" });
+              const r = restoreRemovedVersion(root, String(body.dir), "human:gui");
+              return json(res, 200, { ok: true, restored: r.slug, ...listTrash(root) });
+            }
+            return json(res, 400, { error: `未知 action：${action}` });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },
       },

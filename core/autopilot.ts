@@ -12,7 +12,7 @@
  * 归档复用内置 archiveGoal/unarchiveGoal（versions/vX/archived/…），本模块只补 listArchived。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { appendEvent, readEvents } from "./events.ts";
@@ -614,4 +614,69 @@ export function applyTemplate(
     details: { template: id, goal: goalId, version: opts.version ?? null },
   });
   return { created: [created] };
+}
+
+// ---------------------------------------------------------------------------
+// 回收站（看板最底部一行）：已归档目标 + 已移除版本，可一键恢复
+// ---------------------------------------------------------------------------
+export const TRASH_DIR = "_removed";
+
+/**
+ * 固定分组：与「独立目标」同属性——**不可删除**（负责人 2026-10-03 指定）。
+ * 这是唯一事实来源：host 的 delete-version 路由与客户端隐藏删除入口都读它。
+ */
+export const PROTECTED_VERSION_SLUGS: string[] = ["interaction", "deploy-test", "backend"];
+
+export function isProtectedVersion(slug: unknown): boolean {
+  return PROTECTED_VERSION_SLUGS.includes(String(slug ?? "").trim());
+}
+
+export interface RemovedVersion {
+  /** 回收站内的目录名（含移入时间戳），恢复时用它定位 */
+  dir: string;
+  /** 去掉时间戳后的原版本 slug */
+  slug: string;
+  name: string;
+  moved_at: string;
+}
+
+export function listRemovedVersions(root: string): RemovedVersion[] {
+  const base = join(root, TRASH_DIR);
+  if (!existsSync(base)) return [];
+  const out: RemovedVersion[] = [];
+  for (const dir of readdirSync(base)) {
+    const vfile = join(base, dir, "version.md");
+    if (!existsSync(vfile)) continue;
+    const m = dir.match(/^(.*)-(\d{8}T\d{6})$/);
+    let name = dir;
+    try {
+      const doc = loadGoal(vfile);
+      name = String(doc.meta?.name ?? dir);
+    } catch { /* 半成品用目录名兜底 */ }
+    out.push({ dir, slug: (m ? m[1] : dir).trim(), name, moved_at: m ? m[2] : "" });
+  }
+  return out;
+}
+
+/** 把回收站里的版本目录移回 versions/<slug>。目标已存在则拒绝（绝不覆盖）。 */
+export function restoreRemovedVersion(root: string, dir: string, actor: string): { ok: true; slug: string } {
+  const base = String(dir ?? "").trim();
+  if (!base || base.includes("/") || base.includes("\\") || base === "." || base === "..") {
+    throw new GraphError(`非法回收站条目：${dir}`);
+  }
+  const src = join(root, TRASH_DIR, base);
+  if (!existsSync(src)) throw new GraphError(`回收站中不存在：${base}`);
+  const m = base.match(/^(.*)-(\d{8}T\d{6})$/);
+  const slug = (m ? m[1] : base).trim();
+  if (!slug) throw new GraphError(`无法从目录名解析版本 slug：${base}`);
+  const dst = join(root, "versions", slug);
+  if (existsSync(dst)) throw new GraphError(`版本 ${slug} 已存在，恢复会覆盖，已拒绝（请先重命名或清理）`);
+  mkdirSync(dirname(dst), { recursive: true });
+  renameSync(src, dst);
+  appendEvent(root, { actor, event: "autopilot.trash_restored", details: { kind: "version", dir: base, slug } });
+  return { ok: true, slug };
+}
+
+export function listTrash(root: string): { goals: { id: string; title: string; from: string }[]; versions: RemovedVersion[] } {
+  return { goals: listArchived(root), versions: listRemovedVersions(root) };
 }

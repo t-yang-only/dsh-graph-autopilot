@@ -548,6 +548,8 @@
       'versionDetail.reactivateDescription': '恢复 {slug} 将撤销发布状态，使版本重新进入 active（进行中）。已交付的目标不受影响，再次发布仍需满足全部目标 delivered 等校验。',
       'version.renameCurrent': '当前：{name}（{slug}）',
       'version.deleteEmptyOnly': '⚠️ 此操作不可逆，仅删除空版本（无任何目标含归档）',
+      // [autopilot-fork] 固定分组（交互/部署测试/后端）与独立目标同属性：不可删除
+      'version.protectedNote': '🔒 固定分组（与独立目标同属性，不可删除）',
       'tagFilter.selected': '已选 {count} 个标签',
       'createGoal.standaloneOption': '独立目标',
 
@@ -1608,6 +1610,7 @@
       'versionDetail.reactivateDescription': 'Reactivating {slug} will revoke its released state and return it to active. Delivered goals are unaffected; releasing again still requires all goals to be delivered.',
       'version.renameCurrent': 'Current: {name} ({slug})',
       'version.deleteEmptyOnly': '⚠️ This action is irreversible; only empty versions (without any goal, including archived goals) can be deleted',
+      'version.protectedNote': '🔒 Fixed group (same as Standalone: cannot be deleted)',
       'tagFilter.selected': '{count} tags selected',
       'createGoal.standaloneOption': 'Standalone goal',
 

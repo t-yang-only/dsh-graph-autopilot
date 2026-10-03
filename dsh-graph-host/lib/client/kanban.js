@@ -2187,8 +2187,9 @@
         laneIndex++;
         rows.push(...backlogRow(dgT("view.backlogLane"), b.backlog, "backlog"));
       }
-      // [autopilot-fork] 模板行：固定在看板最底部（可复用目标蓝图，拖到任意泳道即建目标）
+      // [autopilot-fork] 模板行 + 回收站行：固定在看板最底部（两行都可折叠、默认折叠，展开时每 10s 实时刷新）
       rows.push(h(TemplateLane, { key: "tpl-lane", workspace: activeWs, fullWidth: singleColumnMode }));
+      rows.push(h(TrashLane, { key: "trash-lane", workspace: activeWs, fullWidth: singleColumnMode }));
 
       // g-352：单版本模式不渲染 released 折叠区（判据 3：DOM 中仅存在选中版本一个泳道）。
       // g-366：搜索聚合泳道档同理不渲染 released 折叠区（命中若在已发布/已隐藏版本，由聚合泳道直接呈现）。
@@ -3286,16 +3287,19 @@
                         }, dgT("versionDetail.reactivate"))
                     : null,
                   // 删除
-                  h("button", {
-                    style: { ...S.btn, padding: "6px 16px", fontSize: 13, color: "var(--dsw-alias-state-error-primary, #ff6b6b)", opacity: 0.7 },
-                    className: "dg-btn",
-                    onClick: () => {
-                      setDeleteVersionTarget({ slug: versionDetailTarget.slug, name: versionDetailTarget.name });
-                      setDeleteVersionNote(null);
-                      setVersionDetailTarget(null);
-                      setVersionDetailData(null);
-                    },
-                  }, dgT("goal.delete")),
+                  // [autopilot-fork] 固定分组（交互/部署测试/后端）与「独立目标」同属性：不提供删除入口
+                  isApProtectedVersion(versionDetailTarget.slug)
+                    ? h("span", { style: { ...S.meta, fontSize: 11, opacity: 0.6 } }, dgT("version.protectedNote"))
+                    : h("button", {
+                        style: { ...S.btn, padding: "6px 16px", fontSize: 13, color: "var(--dsw-alias-state-error-primary, #ff6b6b)", opacity: 0.7 },
+                        className: "dg-btn",
+                        onClick: () => {
+                          setDeleteVersionTarget({ slug: versionDetailTarget.slug, name: versionDetailTarget.name });
+                          setDeleteVersionNote(null);
+                          setVersionDetailTarget(null);
+                          setVersionDetailData(null);
+                        },
+                      }, dgT("goal.delete")),
                 ),
               ))
           : null,

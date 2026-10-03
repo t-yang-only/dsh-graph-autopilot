@@ -209,7 +209,44 @@ function AutopilotPanel(props) {
   );
 }
 // ---------------------------------------------------------------------------
-// 模板行（看板最底部一行）：可复用目标蓝图 —— 卡片直接拖到任意泳道即按模板建目标
+// 底部行共用外壳：**可折叠（默认折叠，不占位置）** + **实时刷新**（⟳ 手动 + 展开时每 10s 轮询）
+// ---------------------------------------------------------------------------
+const AP_ROW_BTN = { borderRadius: 6, padding: "2px 8px", fontSize: 11, cursor: "pointer", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.12))", color: "inherit", whiteSpace: "nowrap" };const AP_ROW_CHIP = { fontSize: 11, borderRadius: 5, padding: "0 6px", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.15))", color: "var(--dsw-alias-label-secondary, inherit)" };
+// 固定分组（与「独立目标」同属性：不可删除）——须与 core/autopilot.ts 的 PROTECTED_VERSION_SLUGS 保持一致
+const AP_PROTECTED_VERSION_SLUGS = ["interaction", "deploy-test", "backend"];
+function isApProtectedVersion(slug) { return AP_PROTECTED_VERSION_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
+
+function apLaneShell(opts) {
+  const { key, title, count, collapsed, onToggle, onRefresh, refreshing, fullWidth, actions, hint, children } = opts;
+  const labelEl = h("div", {
+    key: key + "-label",
+    onClick: onToggle,
+    title: hint,
+    style: {
+      padding: "5px 10px", borderRadius: 8, background: "rgba(128,128,128,.10)",
+      display: "flex", flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap",
+      minWidth: 0, cursor: "pointer", userSelect: "none",
+      ...(fullWidth || collapsed ? { gridColumn: "1 / -1" } : {}),
+    },
+  },
+    h("span", { style: { fontWeight: 700, fontSize: 12 } }, (collapsed ? "▸ " : "▾ ") + title + " · " + count),
+    collapsed ? h("span", { style: { opacity: 0.55, fontSize: 11 } }, "点击展开") : null,
+    h("span", { style: { flex: 1 } }),
+    ...(actions ?? []),
+    h("button", {
+      style: AP_ROW_BTN, title: "立即刷新这一行（展开时也会每 10 秒自动刷新）",
+      onClick: (e) => { e.stopPropagation(); onRefresh(); },
+    }, refreshing ? "…" : "⟳ 刷新"),
+  );
+  const bodyEl = collapsed ? null : h("div", {
+    key: key + "-body",
+    style: { gridColumn: fullWidth ? "1 / -1" : "2 / -1", display: "flex", flexDirection: "column", gap: 8, minWidth: 0, padding: "8px 10px", borderRadius: 8, background: "rgba(128,128,128,.04)" },
+  }, ...(children ?? []));
+  return h(React.Fragment, null, labelEl, bodyEl);
+}
+
+// ---------------------------------------------------------------------------
+// 模板行（看板底部一行）：可复用目标蓝图 —— 卡片直接拖到任意泳道即按模板建目标
 // ---------------------------------------------------------------------------
 const AP_TEMPLATE_TYPES = ["feature", "bug", "task", "improvement", "patch", "chore"];
 
@@ -220,9 +257,12 @@ function TemplateLane(props) {
   const [form, setForm] = React.useState(null); // {id?, title, type, description, criteriaText}
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState("");
+  const [collapsed, setCollapsed] = React.useState(true); // 默认折叠：不占位置
+  const [refreshing, setRefreshing] = React.useState(false);
 
-  const load = React.useCallback(() => {
+  const load = React.useCallback((silent) => {
     if (!workspace) return;
+    if (!silent) setRefreshing(true);
     fetch("/api/dsh-graph-autopilot/templates", {
       method: "POST", credentials: "same-origin",
       headers: { "content-type": "application/json" },
@@ -230,15 +270,22 @@ function TemplateLane(props) {
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d?.ok) setItems(Array.isArray(d.templates) ? d.templates : []); })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
   }, [workspace]);
 
-  React.useEffect(() => { load(); }, [load]);
+  React.useEffect(() => { load(true); }, [load]);
   React.useEffect(() => {
-    const h = () => load();
+    const h = () => load(true);
     window.addEventListener("autopilot:adopted", h);
     return () => window.removeEventListener("autopilot:adopted", h);
   }, [load]);
+  // 实时刷新：展开时每 10 秒自动同步（折叠时不发请求，零开销）
+  React.useEffect(() => {
+    if (collapsed) return undefined;
+    const t = setInterval(() => load(true), 10000);
+    return () => clearInterval(t);
+  }, [collapsed, load]);
 
   const send = (body) => fetch("/api/dsh-graph-autopilot/templates", {
     method: "POST", credentials: "same-origin",
@@ -278,23 +325,10 @@ function TemplateLane(props) {
       .finally(() => setBusy(false));
   };
 
-  const btn = { borderRadius: 6, padding: "2px 8px", fontSize: 11, cursor: "pointer", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.12))", color: "inherit", whiteSpace: "nowrap" };
+  const btn = AP_ROW_BTN;
   const btnPrimary = { ...btn, background: "var(--dsw-alias-button-primary-fill, rgba(76,141,255,.9))", color: "#fff", borderColor: "transparent" };
-  const chip = { fontSize: 11, borderRadius: 5, padding: "0 6px", background: "var(--dsw-alias-fill-tsp-secondary, rgba(128,128,128,.15))", color: "var(--dsw-alias-label-secondary, inherit)" };
+  const chip = AP_ROW_CHIP;
   const input = { borderRadius: 6, border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.35))", background: "transparent", color: "inherit", padding: "3px 8px", fontSize: 12, fontFamily: "inherit" };
-  const labelBg = "rgba(128,128,128,.10)";
-
-  const labelEl = h("div", {
-    key: "tpl-lane-label",
-    style: { padding: "8px 10px", borderRadius: 8, background: labelBg, display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start", justifyContent: "center", minWidth: 0, ...(props?.fullWidth ? { gridColumn: "1 / -1" } : {}) },
-  },
-    h("span", { style: { fontWeight: 700, fontSize: 12 } }, "🧩 模板 · " + items.length),
-    h("button", {
-      style: btn, disabled: !!busy,
-      title: "新建模板：填写标题/类型/描述/判据，之后拖到泳道即可复用",
-      onClick: () => setForm((f) => f ?? { id: null, title: "", type: "task", description: "", criteriaText: "" }),
-    }, "＋ 新建"),
-  );
 
   const cards = items.length > 0
     ? h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 8 } },
@@ -327,33 +361,156 @@ function TemplateLane(props) {
       )))
     : h("div", { style: { opacity: 0.6, fontSize: 12, padding: "6px 0" } }, "暂无模板。点「＋ 新建」建一个可复用任务蓝图；建好后把卡片拖到上方任意泳道即可建目标执行。");
 
-  const contentEl = h("div", {
-    key: "tpl-lane-body",
-    style: { gridColumn: props?.fullWidth ? "1 / -1" : "2 / -1", display: "flex", flexDirection: "column", gap: 8, minWidth: 0, padding: "8px 10px", borderRadius: 8, background: "rgba(128,128,128,.04)" },
-  },
-    form && h("div", { style: { display: "flex", flexDirection: "column", gap: 6, padding: 8, borderRadius: 8, border: "1px dashed var(--dsw-alias-border-secondary, rgba(128,128,128,.4))" } },
-      h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
-        h("span", { style: { fontSize: 12, fontWeight: 700 } }, form.id ? "编辑模板" : "新建模板"),
-        h("input", { style: { ...input, flex: 1, minWidth: 180 }, placeholder: "模板标题（必填）", value: form.title, onChange: (e) => setForm((f) => ({ ...f, title: e.target.value })) }),
-        h("select", { style: input, value: form.type, onChange: (e) => setForm((f) => ({ ...f, type: e.target.value })) },
-          AP_TEMPLATE_TYPES.map((t) => h("option", { key: t, value: t }, t))),
+  return apLaneShell({
+    key: "tpl-lane",
+    title: "🧩 模板",
+    count: items.length,
+    collapsed,
+    onToggle: () => setCollapsed((c) => !c),
+    onRefresh: () => load(false),
+    refreshing,
+    fullWidth: !!props?.fullWidth,
+    hint: "可折叠（默认折叠，省位置）；展开后每 10 秒自动刷新；卡片可拖到任意泳道建目标",
+    actions: [
+      h("button", {
+        key: "new", style: btn, disabled: !!busy,
+        title: "新建模板：填写标题/类型/描述/判据，之后拖到泳道即可复用",
+        onClick: (e) => { e.stopPropagation(); setCollapsed(false); setForm((f) => f ?? { id: null, title: "", type: "task", description: "", criteriaText: "" }); },
+      }, "＋ 新建"),
+    ],
+    children: [
+      form && h("div", { key: "form", style: { display: "flex", flexDirection: "column", gap: 6, padding: 8, borderRadius: 8, border: "1px dashed var(--dsw-alias-border-secondary, rgba(128,128,128,.4))" } },
+        h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
+          h("span", { style: { fontSize: 12, fontWeight: 700 } }, form.id ? "编辑模板" : "新建模板"),
+          h("input", { style: { ...input, flex: 1, minWidth: 180 }, placeholder: "模板标题（必填）", value: form.title, onChange: (e) => setForm((f) => ({ ...f, title: e.target.value })) }),
+          h("select", { style: input, value: form.type, onChange: (e) => setForm((f) => ({ ...f, type: e.target.value })) },
+            AP_TEMPLATE_TYPES.map((t) => h("option", { key: t, value: t }, t))),
+        ),
+        h("textarea", { style: { ...input, height: 44, resize: "vertical" }, placeholder: "任务描述（会写进 goal.md）", value: form.description, onChange: (e) => setForm((f) => ({ ...f, description: e.target.value })) }),
+        h("textarea", { style: { ...input, height: 44, resize: "vertical" }, placeholder: "验收判据，一行一条（建目标时自动写入并确认）", value: form.criteriaText, onChange: (e) => setForm((f) => ({ ...f, criteriaText: e.target.value })) }),
+        h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
+          h("button", { style: btnPrimary, disabled: !!busy, onClick: save }, busy ? "…" : "保存模板"),
+          h("button", { style: btn, disabled: !!busy, onClick: () => { setForm(null); setMsg(""); } }, "取消"),
+          msg && h("span", { style: { color: "#e05a5a", fontSize: 11 } }, msg),
+        ),
       ),
-      h("textarea", { style: { ...input, height: 44, resize: "vertical" }, placeholder: "任务描述（会写进 goal.md）", value: form.description, onChange: (e) => setForm((f) => ({ ...f, description: e.target.value })) }),
-      h("textarea", { style: { ...input, height: 44, resize: "vertical" }, placeholder: "验收判据，一行一条（建目标时自动写入并确认）", value: form.criteriaText, onChange: (e) => setForm((f) => ({ ...f, criteriaText: e.target.value })) }),
-      h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
-        h("button", { style: btnPrimary, disabled: !!busy, onClick: save }, busy ? "…" : "保存模板"),
-        h("button", { style: btn, disabled: !!busy, onClick: () => { setForm(null); setMsg(""); } }, "取消"),
-        msg && h("span", { style: { color: "#e05a5a", fontSize: 11 } }, msg),
-      ),
-    ),
-    !form && msg && h("div", { style: { color: "#e05a5a", fontSize: 11 } }, msg),
-    cards,
-  );
+      !form && msg && h("div", { key: "msg", style: { color: "#e05a5a", fontSize: 11 } }, msg),
+      cards,
+    ],
+  });
+}
 
-  return h(React.Fragment, null, labelEl, contentEl);
+// ---------------------------------------------------------------------------
+// 回收站行（看板最底部）：已归档目标 + 已移除版本，均可一键恢复；可折叠 + 实时刷新
+// ---------------------------------------------------------------------------
+function TrashLane(props) {
+  const workspace = props?.workspace ?? null;
+  const [data, setData] = React.useState({ goals: [], versions: [] });
+  const [collapsed, setCollapsed] = React.useState(true); // 默认折叠
+  const [refreshing, setRefreshing] = React.useState(false);
+  const [busy, setBusy] = React.useState("");
+  const [msg, setMsg] = React.useState("");
+
+  const load = React.useCallback((silent) => {
+    if (!workspace) return;
+    if (!silent) setRefreshing(true);
+    fetch("/api/dsh-graph-autopilot/trash", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "list" }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.ok) setData({ goals: d.goals ?? [], versions: d.versions ?? [] }); })
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
+  }, [workspace]);
+
+  React.useEffect(() => { load(true); }, [load]);
+  React.useEffect(() => {
+    const h = () => load(true);
+    window.addEventListener("autopilot:trash-changed", h);
+    return () => window.removeEventListener("autopilot:trash-changed", h);
+  }, [load]);
+  // 实时刷新：展开时每 10 秒自动同步
+  React.useEffect(() => {
+    if (collapsed) return undefined;
+    const t = setInterval(() => load(true), 10000);
+    return () => clearInterval(t);
+  }, [collapsed, load]);
+
+  const restore = (body) => {
+    setBusy(JSON.stringify(body)); setMsg("");
+    fetch("/api/dsh-graph-autopilot/trash", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, ...body }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (!ok) { setMsg("❌ " + (d?.error ?? "恢复失败")); return; }
+        setData({ goals: d.goals ?? [], versions: d.versions ?? [] });
+        setMsg("✅ 已恢复：" + (d.restored ?? ""));
+        // 让看板立即重绘（恢复的目标/版本要马上出现）
+        window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { restored: d.restored } }));
+        window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setBusy(""));
+  };
+
+  const total = data.goals.length + data.versions.length;
+  const children = [
+    data.versions.length > 0 && h("div", { key: "v", style: { display: "flex", flexDirection: "column", gap: 4 } },
+      h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已移除的版本泳道（恢复后回到看板，数据完整）"),
+      h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 } },
+        data.versions.map((v) => h("div", {
+          key: v.dir,
+          style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #8a8f98", display: "flex", flexDirection: "column", gap: 4, fontSize: 12 },
+        },
+          h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
+            h("b", null, "🏷️ " + v.name),
+            h("span", { style: AP_ROW_CHIP }, v.slug),
+          ),
+          h("div", { style: { opacity: 0.6, fontSize: 11 } }, "移入时间：" + (v.moved_at || "—")),
+          h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
+            h("button", { style: AP_ROW_BTN, disabled: !!busy, onClick: () => restore({ action: "restore-version", dir: v.dir }) }, busy.indexOf(v.dir) >= 0 ? "…" : "↩ 恢复版本"),
+          ),
+        )))),
+    data.goals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
+      h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已归档的目标（恢复后回到原泳道）"),
+      h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 } },
+        data.goals.map((g) => h("div", {
+          key: g.id,
+          style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #6b7280", display: "flex", flexDirection: "column", gap: 4, fontSize: 12 },
+        },
+          h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
+            h("b", null, g.title),
+            h("span", { style: AP_ROW_CHIP }, g.id),
+          ),
+          h("div", { style: { opacity: 0.6, fontSize: 11 } }, "来源：" + g.from),
+          h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
+            h("button", { style: AP_ROW_BTN, disabled: !!busy, onClick: () => restore({ action: "restore-goal", goal: g.id }) }, busy.indexOf(g.id) >= 0 ? "…" : "↩ 恢复目标"),
+          ),
+        )))),
+    total === 0 && h("div", { key: "empty", style: { opacity: 0.6, fontSize: 12, padding: "6px 0" } }, "回收站是空的：被移除的版本泳道与已归档目标都会出现在这里，可随时恢复。"),
+    msg && h("div", { key: "msg", style: { fontSize: 11, color: msg.indexOf("❌") === 0 ? "#e05a5a" : "#3ecf8e" } }, msg),
+  ];
+
+  return apLaneShell({
+    key: "trash-lane",
+    title: "🗑 回收站",
+    count: total,
+    collapsed,
+    onToggle: () => setCollapsed((c) => !c),
+    onRefresh: () => load(false),
+    refreshing,
+    fullWidth: !!props?.fullWidth,
+    hint: "可折叠（默认折叠，省位置）；展开后每 10 秒自动刷新；恢复已移除版本 / 已归档目标",
+    children,
+  });
 }
 
 >>>ESM-EXPORTS-START>>>
 // 仅 node --test / 静态检查用；浏览器 bundle 由 build-client.sh 剥离本块。
-export { AutopilotPanel, TemplateLane, apDragStart, apDragEnd, apAdoptIntoLane };
+export { AutopilotPanel, TemplateLane, TrashLane, apDragStart, apDragEnd, apAdoptIntoLane };
 <<<ESM-EXPORTS-END<<<
