@@ -1764,16 +1764,8 @@
           label,
           // g-352 att-003 第 8 项：「查看版本」下拉就挂在版本行标题里、[ + ] 左侧（单泳道档唯一一行）
           vertical ? laneVersionPickerEl : null,
-          // [v0.20] 行自带 ▶：直接在这行启动自动驾驶（负责人要求：不要把 ▶ 集中在面板里）
-          version ? h("button", {
-            style: {
-              ...S.btn, position: "absolute", right: 34, top: 8, bottom: "auto",
-              ...(vertical ? rowBtnStyle({ iconOnly: true }) : { fontSize: 11, padding: "0 5px", lineHeight: 1.4 }),
-            },
-            className: "dg-btn",
-            title: "自动驾驶本行：逐目标 收集→执行→评审（机审按当前设置）→交付",
-            onClick: (e) => { e.stopPropagation(); apRunLane(version, label); },
-          }, "▶") : null,
+          // [v0.20] 行自带 ▶ / ■：运行中变绿（v0.24），点一次启动、再点中断
+          version ? h(LaneRunButton, { key: "run-" + version, lane: version, label }) : null,
           // g-129: 每个 lane 标题右下角加「+」按钮（版本 lane 预选版本，独立/backlog 进 backlog）
           h("button", {
             style: {
@@ -3157,7 +3149,7 @@
                 // g-177: 重命名按钮移到版本标题右边（跟 goal 卡片交互一致：标题行内小 ✏️）
                 h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 12, flexWrap: "wrap" } },
                   h("span", { style: { fontWeight: 700, fontSize: 15 } }, isDefaultGroup(versionDetailTarget.slug)
-                    ? "📁 分组：" + versionDetailTarget.name + "（常驻分组 · 与独立目标同属性）"
+                    ? "📁 分组：" + versionDetailTarget.name
                     : dgT("versionDetail.title") + "：" + versionDetailTarget.name),
                   h("button", {
                     style: { ...S.btn, fontSize: 11, padding: "1px 6px", opacity: 0.7, display: isDefaultGroup(versionDetailTarget.slug) ? "none" : undefined }, className: "dg-btn",
@@ -3175,21 +3167,20 @@
                 // 基本信息
                 h("div", { style: { marginBottom: 12, fontSize: 13, opacity: 0.8 } },
                   isDefaultGroup(versionDetailTarget.slug) ? null : h("div", null, `Slug：${versionDetailTarget.slug}`),
-                  // [v0.23] 常驻分组不显示版本状态（它们没有版本语义）
+                  // [v0.23] 常驻分组：不显示版本状态，也不再重复啰嗦保护说明（与独立目标一样干净）
                   isDefaultGroup(versionDetailTarget.slug)
-                    ? h("div", null, "🔒 " + dgT("version.protectedNote"))
+                    ? null
                     : h("div", null, dgT("versionDetail.status") + (versionDetailTarget.status === "released" ? "🟢 released" : versionDetailTarget.status === "active" ? "🔵 " + dgT("versionDrawer.active") : `⚪ ${versionDetailTarget.status}`)),
                   h("div", null, dgT("versionDetail.goals") + versionDetailTarget.goals_count),
                 ),
                 // g-135: 版本摘要/范围（从 version.md 的「范围」小节读取）
                 h("div", { style: { marginBottom: 12 } },
-                  h("div", { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } }, isDefaultGroup(versionDetailTarget.slug) ? "📁 常驻分组" : dgT("versionDetail.summary")),
+                  h("div", { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } }, isDefaultGroup(versionDetailTarget.slug) ? null : dgT("versionDetail.summary")),
                   // [v0.20] 每条泳道在自己的详情弹窗里编辑「职责提示词」
                   h(LanePromptEditor, { workspace: activeWs, lane: versionDetailTarget.slug }),
                   // [v0.23] 常驻分组：不显示版本摘要，改为分组说明
                   isDefaultGroup(versionDetailTarget.slug)
-                    ? h("div", { style: { fontSize: 12, opacity: 0.8, padding: "6px 8px", borderRadius: 4, background: "rgba(128,128,128,.08)", lineHeight: 1.5 } },
-                        "每个工作区都有的常驻分组；与「独立目标」同属性，不可删除、不参与版本发布/归档。上面可设置它的职责提示词 —— 派发本分组任务时会注入执行子 AI，让它知道这条线是干什么的。")
+                    ? null
                     : versionDetailLoading
                     ? h("div", { style: { fontSize: 12, opacity: 0.5 } }, dgT("common.loading"))
                     : (versionDetailData?.summary || versionDetailData?.scope)
@@ -3371,7 +3362,7 @@
                   // 删除
                   // [autopilot-fork] 固定分组（交互/部署测试/后端）与「独立目标」同属性：不提供删除入口
                   isApProtectedVersion(versionDetailTarget.slug)
-                    ? h("span", { style: { ...S.meta, fontSize: 11, opacity: 0.6 } }, dgT("version.protectedNote"))
+                    ? h("span", { style: { ...S.meta, fontSize: 11, opacity: 0.6 } }, isDefaultGroup(versionDetailTarget.slug) ? "" : dgT("version.protectedNote"))
                     : h("button", {
                         style: { ...S.btn, padding: "6px 16px", fontSize: 13, color: "var(--dsw-alias-state-error-primary, #ff6b6b)", opacity: 0.7 },
                         className: "dg-btn",

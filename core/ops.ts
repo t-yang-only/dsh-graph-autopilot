@@ -7837,6 +7837,16 @@ export function backlogGoals(root: string, opts?: { includeArchived?: boolean })
  */
 export function compareVersions(a: string = "", b: string = ""): number {
   if (a === b) return 0;
+  // [v0.24] 常驻分组固定顺序（负责人指定：部署 → 交互 → 后端），且永远排在最前。
+  // 与 core/autopilot.ts 的 DEFAULT_GROUPS 顺序保持一致。
+  const GROUP_ORDER = ["deploy-test", "interaction", "backend"];
+  const ia = GROUP_ORDER.indexOf(a);
+  const ib = GROUP_ORDER.indexOf(b);
+  if (ia !== -1 || ib !== -1) {
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  }
   if (!a && !b) return 0;
   if (!a) return 1;
   if (!b) return -1;

@@ -53,6 +53,50 @@ function apAdoptIntoLane(target) {
     .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
 }
 
+// ---------------------------------------------------------------------------
+// [v0.24] 行运行按钮：运行中的泳道按钮变绿并可点中断，附「运行中」提示
+// ---------------------------------------------------------------------------
+let apRunState = { version: null, paused: null };
+const apRunSubs = new Set();
+let apRunTimer = null;
+function apRunEnsurePoll() {
+  if (apRunTimer) return;
+  apRunTimer = setInterval(() => {
+    if (!apPanelWorkspace) return;
+    fetch("/api/dsh-graph-autopilot/state?workspace=" + encodeURIComponent(apPanelWorkspace), { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d?.ok) return;
+        apRunState = { version: d.runner?.version ?? null, paused: d.runner?.paused ?? null };
+        for (const s of apRunSubs) { try { s(apRunState); } catch { /* 订阅者已卸载 */ } }
+      })
+      .catch(() => {});
+  }, 5000);
+  if (apRunTimer.unref) apRunTimer.unref();
+}
+
+function LaneRunButton(props) {
+  const version = props?.lane ? String(props.lane) : "";
+  const label = props?.label ?? version;
+  const [st, setSt] = React.useState(apRunState);
+  React.useEffect(() => {
+    apRunEnsurePoll();
+    const s = (v) => setSt(v);
+    apRunSubs.add(s);
+    s(apRunState);
+    return () => { apRunSubs.delete(s); };
+  }, []);
+  const running = !!version && st.version === version;
+  const base = { ...AP_ROW_BTN, position: "absolute", right: 34, top: 8, bottom: "auto", fontSize: 11, padding: "0 5px", lineHeight: 1.4 };
+  return h("button", {
+    style: running ? { ...base, background: "#2e9e5b", borderColor: "#2e9e5b", color: "#fff", fontWeight: 700 } : base,
+    className: "dg-btn",
+    "data-ap-run-btn": version,
+    title: running ? `「${version}」正在自动驾驶中（点此中断）` : "自动驾驶本行：逐目标 收集→执行→评审→交付",
+    onClick: (e) => { e.stopPropagation(); if (running) apStopLane(label); else apRunLane(version, label); },
+  }, running ? "■ 运行中" : "▶");
+}
+
 /** [v0.20] 行自带 ▶：直接在这个泳道行上启动自动驾驶（不用回面板） */
 function apRunLane(version, label) {
   if (!version || !apPanelWorkspace) return;
@@ -767,7 +811,7 @@ function TrashLane(props) {
   const children = [
     data.versions.length > 0 && h("div", { key: "v", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已移除的版本泳道（恢复后回到看板，数据完整）"),
-      h("div", { style: { display: "flex", flexWrap: "nowrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
+      h("div", { style: { display: "flex", flexWrap: "wrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
         data.versions.map((v) => h("div", {
           key: v.dir,
           style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #8a8f98", display: "flex", flexDirection: "column", gap: 4, fontSize: 12 },
@@ -788,7 +832,7 @@ function TrashLane(props) {
         )))),
     data.goals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已归档的目标（恢复后回到原泳道）"),
-      h("div", { style: { display: "flex", flexWrap: "nowrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
+      h("div", { style: { display: "flex", flexWrap: "wrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
         data.goals.map((g) => h("div", {
           key: g.id,
           draggable: true,
@@ -883,7 +927,7 @@ function LanePromptEditor(props) {
   const dirty = text !== saved;
   return h("div", { style: { marginTop: 10, borderTop: "1px solid rgba(128,128,128,.25)", paddingTop: 8 } },
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 } },
-      h("span", { style: { fontWeight: 700, fontSize: 12 } }, "🏷 泳道职责提示词"),
+      h("span", { style: { fontWeight: 700, fontSize: 12 } }, "职责提示词"),
       h("span", { style: { ...AP_ROW_CHIP, fontSize: 10 } }, lane),
       dirty ? h("span", { style: { fontSize: 10, color: "#e0a53a" } }, "未保存") : null,
     ),
@@ -981,13 +1025,21 @@ function LinksLayer(props) {
 
   const onClickCard = (e) => {
     if (mode === "idle") return;
-    const card = e.target?.closest?.("[data-goal-id]");
-    if (!card) return;
-    const id = card.getAttribute("data-goal-id");
+    // ⚠️ 捕获层盖在整个视口上，e.target 永远是本层自身 → 必须用坐标命中测试找卡片
+    let el = null;
+    try {
+      const stack = document.elementsFromPoint(e.clientX, e.clientY) || [];
+      el = stack.find((n) => n?.getAttribute?.("data-goal-id"));
+    } catch { el = null; }
+    if (!el) {           // 空白处点击 = 取消已选起点（回到空闲也不退出模式）
+      if (pending) { setPending(null); setMsg("已取消起点选择"); }
+      return;
+    }
+    const id = el.getAttribute("data-goal-id");
     e.preventDefault();
     e.stopPropagation();
     if (mode === "erase") return;
-    const rect = card.getBoundingClientRect();
+    const rect = el.getBoundingClientRect();
     const rel = (e.clientY - rect.top) / Math.max(1, rect.height);
     const kind = rel < 0.33 ? "start" : rel > 0.66 ? "end" : "mid";
     if (!pending) { setPending({ id, kind }); setMsg(`起点 ${id}（${AP_LINK_KINDS[kind].label}）→ 再点终点`); return; }
@@ -1062,9 +1114,9 @@ function LinksLayer(props) {
       style: { position: "absolute", inset: 0, pointerEvents: mode === "erase" ? "none" : "auto", cursor: "crosshair" },
       onClick: onClickCard,
     }),
-    // 工具条
+    // 工具条：放在**最上面**（看板顶部工具行下方），与其它工具并列
     h("div", {
-      style: { position: "absolute", left: 12, bottom: 12, pointerEvents: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "6px 10px", borderRadius: 10, background: "rgba(20,22,27,.86)", border: "1px solid rgba(140,145,155,.45)", fontSize: 11 },
+      style: { position: "absolute", left: 10, top: 58, pointerEvents: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "4px 8px", borderRadius: 8, background: "rgba(20,22,27,.88)", border: "1px solid rgba(140,145,155,.45)", fontSize: 11 },
     },
       h("span", { style: { fontWeight: 700 } }, "🔗 任务连线"),
       h("span", { style: AP_ROW_CHIP }, links.length + " 条"),
