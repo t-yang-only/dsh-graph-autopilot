@@ -200,6 +200,7 @@ import {
   // [v0.27] 问题 22：带附件目标强制回草稿（目录形态保留 cards/attempts）
   moveGoalToDraftForce,
   listBlockedGoals,
+  reapStaleAttempts,
   listRegistry,
   setCriteriaChecked,
   unmetCriteria,
@@ -5210,7 +5211,7 @@ export function apply(ctx, config) {
             parameters: params({
               action: {
                 type: "string",
-                description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|steward_set|advance_mode_set|catalog_list|settings_get|settings_set|links_list|links_add|links_remove|links_check|links_bulk|status",
+                description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|steward_set|advance_mode_set|catalog_list|settings_get|settings_set|links_list|links_add|links_remove|stale_check|stale_reap|links_check|links_bulk|status",
               },
               links: { type: "array", description: "[v0.30] links_bulk：要新增的连线数组 [{from, to, kind}]（kind: start=开始连接 / end=结束连接 / mid=实时协作）。已存在（同 from+to+kind）记为 skipped 不算错误；非法条目进 errors 并继续处理其余条目。" },
               settings: { type: "object", description: "[v0.28] settings_set 的设置对象（看板设置）：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels/advanceMode/steward({enabled})。profile 级设置（subagentProvider/subagentModel/subagentMode/subagentReasoningEffort/subagentPrompt/promptLanguage）由 DSH 设置页写入，本 action 不写并会在 skipped 里说明。" },
@@ -5433,6 +5434,22 @@ export function apply(ctx, config) {
               return { ok: true, added: out.added, skipped: out.skipped, errors: out.errors, links: out.links };
             }
             case "links_remove": return { ok: true, ...removeLink(root, String(a.id ?? ""), autopilotActor(ex)) };
+            // [v0.31] 陈旧 attempt 诊断/自愈：排查「任务卡住不跑」的第一入口
+            case "stale_check": {
+              const dry = reapStaleAttempts(root, { isLive: (cid) => { const s = childLiveState(cid); return s === "running" || s === "idle"; }, actor: autopilotActor(ex), dryRun: true });
+              return {
+                ok: true,
+                stale: dry.reaped,
+                alive: dry.kept,
+                hint: dry.reaped.length
+                  ? `发现 ${dry.reaped.length} 个死掉的进行中 attempt（目标 ${[...new Set(dry.reaped.map((x) => x.goal))].join("、")}）——它们会让目标卡在 in_progress 无法派发；用 stale_reap 清理`
+                  : "没有陈旧的进行中 attempt（任务卡住可能是其它原因：判据未确认 / 连线门禁 / 泳道无 ready 目标）",
+              };
+            }
+            case "stale_reap": {
+              const done = reapStaleAttempts(root, { isLive: (cid) => { const s = childLiveState(cid); return s === "running" || s === "idle"; }, actor: autopilotActor(ex) });
+              return { ok: true, reaped: done.reaped, kept: done.kept };
+            }
             case "lane_model_set": {
               const st0 = readAutopilotState(root);
               const cur = { ...(st0.laneModels ?? {}) };
@@ -5918,6 +5935,15 @@ export function apply(ctx, config) {
         try {
           const st = readAutopilotState(r);
           const ws = dirname(r);
+          // [v0.31] 陈旧 attempt 自愈（真 bug 修复）：重启后 pending attempt 的子代理已消失，
+          // 但目标仍停在 in_progress ⇒ readiness 判「已在执行中」⇒ 泳道永远推不动
+          // （实测同一目标被反复重试 72 次、无一成功）。恢复 runner 前先收尾这些死 attempt。
+          try {
+            const reaped = reapStaleAttempts(r, { isLive: (cid) => { const s = childLiveState(cid); return s === "running" || s === "idle"; }, actor: "system:autopilot" });
+            if (reaped.reaped.length) {
+              autopilotLog(`陈旧 attempt 自愈：收尾 ${reaped.reaped.length} 个（目标 ${[...new Set(reaped.reaped.map((x) => x.goal))].join("、")}）`);
+            }
+          } catch { /* 自愈失败不影响后续恢复尝试 */ }
           // [v0.26] 运行恢复（问题 9）：运行意图还在但内存里没有在跑的 runner（DSH 重启/被中断）→ 自动重新起跑，
           // 从当前状态继续（plan 会按目标现有状态重算队列），不需人工再点一次 ▶。
           try {

@@ -2169,6 +2169,73 @@ export function unmetCriteria(root: string, id: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// [v0.31] 陈旧 attempt 自愈（真 bug 修复）
+// DSH 重启后，上次留下的 pending attempt 及其实子代理都已消失，但目标仍停在 in_progress
+// ⇒ laneReadiness 判「已在执行中」⇒ 泳道永远推不动。实测：同一目标被反复重试 **72 次**、
+// 无一成功，全部卡在这个死结上（事件 autopilot.lane_resume_pending 刷屏）。
+// 本原语把「已经死掉的进行中 attempt」收尾（result=cancelled + detached），并把无在跑
+// attempt 的目标从 in_progress 退回 planning，使其重新可派发。带 isLive 判定，绝不误杀真跑着的。
+// ---------------------------------------------------------------------------
+export function reapStaleAttempts(
+  root: string,
+  opts: { isLive?: (childId: string) => boolean; actor: string; dryRun?: boolean },
+): { reaped: { goal: string; attempt: string; child_id: string | null }[]; kept: { goal: string; attempt: string; child_id: string | null }[] } {
+  const reaped: { goal: string; attempt: string; child_id: string | null }[] = [];
+  const kept: { goal: string; attempt: string; child_id: string | null }[] = [];
+  const isLive = opts.isLive ?? (() => false);
+  for (const f of listGoalFiles(root)) {
+    let meta: any = null;
+    try { meta = loadGoal(f).meta; } catch { continue; }
+    if (String(meta?.status ?? "") !== "in_progress") continue;
+    const attDir = join(dirname(f), "attempts");
+    if (!existsSync(attDir)) continue;
+    for (const a of readdirSync(attDir)) {
+      const af = join(attDir, a, "attempt.md");
+      if (!existsSync(af)) continue;
+      let am: any = null;
+      try { am = loadGoal(af).meta; } catch { continue; }
+      if (String(am?.result ?? "") !== "pending") continue;
+      const childId = am?.child_id ? String(am.child_id) : null;
+      let live = false;
+      try { live = childId ? !!isLive(childId) : false; } catch { live = true; } // 判定异常 → 保守视为活，不误杀
+      if (live) { kept.push({ goal: String(meta.id), attempt: String(am.id ?? a), child_id: childId }); continue; }
+      if (opts.dryRun) { reaped.push({ goal: String(meta.id), attempt: String(am.id ?? a), child_id: childId }); continue; }
+      try {
+        const d = loadGoal(af);
+        d.meta.result = "cancelled";
+        d.meta.detached = true;
+        d.meta.finished_at = new Date().toISOString();
+        d.meta.reap_reason = "stale-attempt-reaped（重启后子代理已消失）";
+        saveGoal(af, d);
+        reaped.push({ goal: String(meta.id), attempt: String(am.id ?? a), child_id: childId });
+      } catch { /* 单个失败不影响其余 */ }
+    }
+    if (!opts.dryRun) {
+      try {
+        const stillPending = readdirSync(attDir).some((a) => {
+          const af = join(attDir, a, "attempt.md");
+          try { return existsSync(af) && String(loadGoal(af).meta?.result ?? "") === "pending"; } catch { return false; }
+        });
+        const g = loadGoal(f);
+        if (!stillPending && String(g.meta.status) === "in_progress") {
+          g.meta.status = "planning";
+          g.meta.status_line = null;
+          saveGoal(f, g);
+        }
+      } catch { /* 目标级复位失败不影响其余 */ }
+    }
+  }
+  if (reaped.length && !opts.dryRun) {
+    appendEvent(root, {
+      actor: opts.actor,
+      event: "autopilot.stale_attempts_reaped",
+      details: { count: reaped.length, goals: [...new Set(reaped.map((x) => x.goal))] },
+    });
+  }
+  return { reaped, kept };
+}
+
+// ---------------------------------------------------------------------------
 // [v0.19] 泳道职责提示词：告知执行子代理「这条泳道大概是干什么的」（后端 / 部署测试 / 交互 …）
 // ---------------------------------------------------------------------------
 export function setLanePrompt(

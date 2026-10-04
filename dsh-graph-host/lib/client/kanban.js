@@ -4045,6 +4045,9 @@
         }
         ensure(to).waiting += 1;
         ensure(to).waitingIds.push(from);
+        // [v0.31] 前置是否已交付（后端 /links 已附 from_delivered）：未交付才真正会被门禁挡住，
+        // 已交付的前置只是「曾经等过」——角标据此区分，帮用户判断卡点是否在连线这一环。
+        if (l.from_delivered === false) ensure(to).waitingUnmet = (ensure(to).waitingUnmet ?? 0) + 1;
         ensure(from).blocking += 1;
         ensure(from).blockingIds.push(to);
       }
@@ -4058,6 +4061,7 @@
         const rb = b.get(id);
         if (!rb) return false;
         if (ra.waiting !== rb.waiting || ra.blocking !== rb.blocking || ra.partners !== rb.partners) return false;
+        if ((ra.waitingUnmet ?? 0) !== (rb.waitingUnmet ?? 0)) return false;
         // 角标 title 里要列出对端 id：id 列表也要比，否则「换了一个前置」不会刷新文案
         if (ra.waitingIds.join(",") !== rb.waitingIds.join(",")) return false;
         if (ra.blockingIds.join(",") !== rb.blockingIds.join(",")) return false;
@@ -4089,6 +4093,13 @@
       if ((info.waiting ?? 0) > 0) parts.push("等待 " + info.waiting + " 个前置任务交付：" + (info.waitingIds ?? []).map(label).join("、"));
       if ((info.blocking ?? 0) > 0) parts.push("阻挡 " + info.blocking + " 个后续任务：" + (info.blockingIds ?? []).map(label).join("、"));
       if ((info.partners ?? 0) > 0) parts.push("与 " + info.partners + " 个任务实时协作：" + (info.partnerIds ?? []).map(label).join("、"));
+      // [v0.31] 前置是否**已交付**：已满足却仍没跑 ⇒ 不是连线在挡（指向判据/准入等其它原因）。
+      if ((info.waiting ?? 0) > 0) {
+        parts.push((info.waitingUnmet ?? 0) > 0
+          ? `其中 ${info.waitingUnmet} 个尚未交付 —— 派发门禁会等它们完成`
+          : "前置已全部交付 —— 若本任务仍未运行，请检查质量判据是否确认（或看「任务执行板」）");
+      }
+      // i18n-keep(category-a)：用户可见的角标悬停文案（中文），与上方 parts 同段。
       return h("span", {
         className: "dg-link-badge",
         "aria-hidden": "true",
