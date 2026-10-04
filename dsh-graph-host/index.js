@@ -6099,6 +6099,17 @@ export function apply(ctx, config) {
           try {
             const intent = readRunnerIntent(r);
             if (intent && !autopilotRunners.get(r)) {
+              // [v0.35] 恢复前置检查：若该泳道当前**所有可派发目标都被连线门禁挡住**，就别起重
+              // （起了也会立刻 finish 结束 → 每分钟空转；实测 35 次/200 条事件）。
+              // 保留意图，等前置交付后自然恢复——「不空转、也不遗忘」。
+              let gatedOut = false;
+              try {
+                const plan = laneReadiness(r, intent.version, { isLive: (cid) => childLiveState(cid) !== "gone" });
+                if (plan.runnable.length === 0 && (plan.link_blocked ?? []).length > 0) gatedOut = true;
+              } catch { /* 判定失败则按原逻辑尝试恢复 */ }
+              if (gatedOut) {
+                // 静默等待（不写事件、不日志）——门禁每轮都会重新评估，前置一交付就自动继续
+              } else {
               try {
                 const resumed = autopilotStart(r, intent.version, intent.reviewMode, "system:autopilot");
                 appendEvent(r, { actor: "system:autopilot", event: "autopilot.lane_resumed", details: { version: intent.version, queue: (resumed?.queue ?? []).length } });
@@ -6110,6 +6121,7 @@ export function apply(ctx, config) {
                   clearRunnerIntent(r);
                 }
                 appendEvent(r, { actor: "system:autopilot", event: "autopilot.lane_resume_pending", details: { version: intent.version, error: msg.slice(0, 200), transient: /已在执行中|等待当前 attempt 收尾/.test(msg) } });
+              }
               }
             }
           } catch { /* 恢复检查失败下一轮再试 */ }
