@@ -358,11 +358,19 @@ test("g-174 标题栏源契约：version 链接、新建版本入口迁移、设
   assert.ok(gear >= 0 && debug >= 0 && gear < debug, "⚙ 看板设置按钮应在 DEBUG 信息之前");
 });
 
-test("g-156/g-175 交付/阻塞折叠列源契约：会话态、窄栏标题与数量均保留", () => {
+test("g-156/g-175 交付/阻塞折叠列源契约：会话态、窄栏标题与数量均保留（v0.30 起可记忆）", () => {
   const source = readFileSync(join(process.cwd(), "dsh-graph-host/lib/client/kanban.js"), "utf8");
-  // 折叠状态必须由 React state 持有，不能落到 workspace 或持久化存储。
-  assert.match(source, /const \[deliverColumnCollapsed, setDeliverColumnCollapsed\] = React\.useState\(false\)/);
-  assert.doesNotMatch(source, /localStorage|sessionStorage/);
+  // 折叠状态仍由 React state 持有（v0.30 起初值惰性读持久化；默认值逐字保留在 readPersistedBool 的参数位）。
+  // 旧断言逐字钉 `React.useState(false)`；v0.30 把「初值来源」由字面量改为持久化读取
+  //（用户显式折叠过的列重启后保持折叠），判别力不降反升：仍然要求
+  // ① 状态由 React state 持有（非外部可变对象）② 默认值仍是 false（首次打开仍展开）。
+  assert.match(source, /const \[deliverColumnCollapsed, setDeliverColumnCollapsed\] = React\.useState\(\(\) => readPersistedBool\(PK_DELIVER_COLUMN, false\)\)/);
+  // 持久化只经统一出口（键名常量 + readPersisted*/writePersisted*）；**不得散落直调 localStorage**。
+  assert.doesNotMatch(source, /localStorage\.(getItem|setItem)\((?!PERSIST_PREFIX)/);
+  assert.match(source, /localStorage\.getItem\(PERSIST_PREFIX \+ key\)/);
+  assert.match(source, /localStorage\.setItem\(PERSIST_PREFIX \+ key, JSON\.stringify\(v\)\)/);
+  // 阻塞列对称断言（默认 true）。
+  assert.match(source, /const \[blockedColumnCollapsed, setBlockedColumnCollapsed\] = React\.useState\(\(\) => readPersistedBool\(PK_BLOCKED_COLUMN, true\)\)/);
   // g-175：折叠态列头只显示一个展开图标 ▸（不再竖排「交/付」「阻/塞」两行，
   // 因为列内窄条单元格已含「交付/阻塞」文字与计数，无需重复）。
   assert.match(source, /deliverColumnCollapsed\s*\?\s*\n?\s*"▸"/);
@@ -378,16 +386,21 @@ test("g-156/g-175 交付/阻塞折叠列源契约：会话态、窄栏标题与�
   assert.match(source, /blockedColumnCollapsed \? "36px" : "minmax\(150px, 1fr\)"/);
 });
 
-test("g-162 普通泳道折叠入口位于内容底部且 released 不重复添加", () => {
+test("g-162 普通泳道折叠入口位于内容底部且 released 不重复添加（v0.30 起可记忆）", () => {
   const source = readFileSync(join(process.cwd(), "dsh-graph-host/lib/client/kanban.js"), "utf8");
-  assert.match(source, /const \[collapsedLanes, setCollapsedLanes\] = React\.useState\(\{\}\)/);
+  // v0.30 起初值改为惰性读持久化（用户显式折叠过哪些泳道就恢复哪些）；默认值仍是空表 {}（首开全展开）。
+  assert.match(source, /const \[collapsedLanes, setCollapsedLanes\] = React\.useState\(\(\) => readPersistedBoolMap\(PK_COLLAPSED_LANES\)\)/);
   assert.match(source, /className: "dg-lane-collapse"/);
   assert.match(source, /className: "dg-lane-collapse-triangle"/);
   assert.match(source, /gridColumn: "2 \/ -1"/);
   assert.match(source, /collapsible = true/);
   assert.match(source, /lane\(v\.name, v\.goals, "rellane-" \+ v\.slug, null, laneIndex \+ idx, false\)/);
   assert.doesNotMatch(source, /title: dgT\('lane\.collapseTooltip'\)[\s\S]{0,180}lane\(v\.name, v\.goals, "rellane-/);
-  assert.doesNotMatch(source, /localStorage|sessionStorage/);
+  // v0.30：泳道折叠态可在 localStorage 记忆（用户显式选择），但存储必须**只经统一出口**
+  //（PERSIST_PREFIX + readPersisted*/writePersisted*）；旧断言「全文件不得出现 localStorage」
+  // 已随记忆性功能作废，此处换成**同等强度**的判别：不得有任何绕过统一出口的直调。
+  assert.doesNotMatch(source, /localStorage\.(getItem|setItem)\((?!PERSIST_PREFIX)/);
+  assert.match(source, /function writePersistedJson\(key, v\) \{[\s\S]{0,120}localStorage\.setItem\(PERSIST_PREFIX \+ key, JSON\.stringify\(v\)\)/);
   const backlogControl = source.slice(source.indexOf("// g-162: 泳道折叠按钮"), source.indexOf("// g-137 修复"));
   assert.match(backlogControl, /className: "dg-lane-collapse"/);
   assert.match(backlogControl, /className: "dg-lane-collapse-triangle"/);

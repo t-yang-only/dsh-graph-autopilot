@@ -67,7 +67,7 @@ dsh-graph is a plugin that organizes work into a "goal board". Available graph_*
 ## Help
 - graph_ap_control(action,
   [lane, text, goal, dir, version, picks, claims, from, to, id, kind, note, model, reasoning_effort, items,
-  reviewMode, managerPrompt, managerEnabled, managerIntervalMin, managerUpdateGlobals, confirm, workspace, settings]) drive the whole board from the main conversation (lane prompts, trash, collab, recommendations, globals, review mode, steward, catalog, links, settings, status);
+  reviewMode, managerPrompt, managerEnabled, managerIntervalMin, managerUpdateGlobals, confirm, workspace, settings, links]) drive the whole board from the main conversation (lane prompts, trash, collab, recommendations, globals, review mode, steward, catalog, links, settings, status);
 - graph_collab_post([text, claims, goal, kind, workspace]) post to the task collab channel and claim resources (conflicts are rejected);
 - graph_collab_read([limit, workspace]) read collab messages and active resource claims;
 - graph_help() display this help (full 52-tool checklist with parameter reference).

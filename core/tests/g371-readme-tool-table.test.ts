@@ -392,7 +392,10 @@ test("g-371 判据2/6 负向对照：删表行 / 工具名改错字符 / 计数�
     ],
     base.schemaTools.length,
   );
-  expectRed(countProblems, /README\.md:18 工具计数声明为 50/, "README 工具计数改错");
+  // 行号不写死：README 结构会随版本演进（v0.30 重写 fork README 时计数声明从第 18 行移到第 122 行），
+  // 钉死行号只会把「README 排版变化」误报成守卫失败。文件 id + 错误计数 + 声明原文仍逐项断言 ⇒
+  // 判别力不变（改错值必红、且必须指名是哪个文件的哪条声明错）。
+  expectRed(countProblems, /README\.md:\d+ 工具计数声明为 50/, "README 工具计数改错");
 
   // ④′ 计数声明被整段删除 ⇒ 守卫不得恒真退化
   const noCount = {

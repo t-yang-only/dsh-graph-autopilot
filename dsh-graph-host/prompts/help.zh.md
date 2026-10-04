@@ -67,7 +67,7 @@ dsh-graph 是把工作组织成「目标看板」的插件。可用 graph_* 工�
 ## 帮助
 - graph_ap_control(action,
   [lane, text, goal, dir, version, picks, claims, from, to, id, kind, note, model, reasoning_effort, items,
-  reviewMode, managerPrompt, managerEnabled, managerIntervalMin, managerUpdateGlobals, confirm, workspace, settings]) 主对话控制看板一切：lane_prompt_get/set、trash_list/restore/purge/to_draft、collab_post/read、recs_scan/adopt、deep_scan、global_goal_set、global_prompt_set、review_mode_set、manager_get/set/run、catalog_list、status、links_list/add/remove、steward_set、advance_mode_set、settings_get/set；
+  reviewMode, managerPrompt, managerEnabled, managerIntervalMin, managerUpdateGlobals, confirm, workspace, settings, links]) 主对话控制看板一切：lane_prompt_get/set、trash_list/restore/purge/to_draft、collab_post/read、recs_scan/adopt、deep_scan、global_goal_set、global_prompt_set、review_mode_set、manager_get/set/run、catalog_list、status、links_list/add/remove、steward_set、advance_mode_set、settings_get/set；
 - graph_collab_post([text, claims, goal, kind, workspace]) 协作频道发消息并声明资源（与他人重叠会被拒绝）；
 - graph_collab_read([limit, workspace]) 读取协作频道消息与当前资源占用；
 - graph_help() 显示本帮助（全部 52 个工具清单与参数速查）。

@@ -16,8 +16,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rename
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
-import { appendEvent, readEvents } from "./events.ts";
-import { createGoal, findGoalFile, loadGoal, saveGoal, setCriteria, moveGoal, unarchiveGoal, normalizeGoalType, readGoalBinding, GraphError } from "./ops.ts";
+import { appendEvent, readEvents, type GraphEvent } from "./events.ts";
+import { createGoal, findGoalFile, listGoalFiles, loadGoal, saveGoal, setCriteria, moveGoal, unarchiveGoal, normalizeGoalType, readGoalBinding, GraphError } from "./ops.ts";
 
 export const AUTOPILOT_STATE_FILE = "autopilot.json";
 export const RECOMMENDATIONS_FILE = "autopilot-recommendations.json";
@@ -396,6 +396,15 @@ export interface LaneGoalReadiness {
   status: string;
   ready: boolean;
   blockers: string[];
+  /**
+   * [v0.30] 连线门禁（advisory）：该目标被 start/end 连线挡住（有未交付的前置）。
+   * **不并入 ready/blockers** —— 门禁的「回队尾等待 / 全阻塞收尾」语义由派发循环执行
+   * （见 dsh-graph-host autopilotDispatchNext）；若在此处排除，被挡目标根本进不了队列，
+   * 「等待前置」就永远无法解除。本字段用于展示与排查「为什么这个任务排后/不跑」。
+   */
+  link_blocked?: boolean;
+  /** [v0.30] 在等谁（未交付前置的 goal id，去重）。 */
+  waiting_for?: string[];
 }
 
 export function laneReadiness(root: string, version: string, opts?: {
@@ -409,11 +418,17 @@ export function laneReadiness(root: string, version: string, opts?: {
   version: string;
   goals: LaneGoalReadiness[];
   runnable: string[];
+  /** [v0.30] 本泳道因连线门禁而等待的目标与它在等谁（advisory，与 goals[].link_blocked 同源）。 */
+  link_blocked: { goal: string; waiting_for: string[] }[];
 } {
   const gdir = join(root, "versions", version, "goals");
   if (!existsSync(gdir)) throw new GraphError(`版本 ${version} 不存在或没有 goals 目录`);
   const events = readEvents(root);
+  // [v0.30] 连线门禁判定表：每泳道只扫一次连线表与交付表
+  const links = listLinks(root);
+  const lookup = links.length ? deliveryLookup(root) : null;
   const goals: LaneGoalReadiness[] = [];
+  const linkBlocked: { goal: string; waiting_for: string[] }[] = [];
   for (const id of readdirSync(gdir).sort()) {
     const file = join(gdir, id, "goal.md");
     if (!existsSync(file)) continue;
@@ -439,9 +454,26 @@ export function laneReadiness(root: string, version: string, opts?: {
     if (!desc || desc.startsWith("（待登记")) blockers.push("目标描述为空或占位符——先补写描述再派发");
     const confirmed = events.some((e) => e.goal === id && e.event === "criteria.confirmed");
     if (!confirmed) blockers.push("质量判据未确认（criteria.confirmed 缺失）");
-    goals.push({ id, title: doc.meta.title ?? id, status: String(doc.meta.status ?? ""), ready: blockers.length === 0, blockers });
+    // [v0.30] 连线门禁（advisory，不并入 ready）
+    let link_blocked = false;
+    let waiting_for: string[] = [];
+    if (lookup) {
+      try {
+        const rep = linkGateReport(root, id, { lookup, links });
+        if (rep.blocked) {
+          link_blocked = true;
+          waiting_for = [...new Set(rep.unsatisfied.map((c) => c.from))];
+          linkBlocked.push({ goal: id, waiting_for });
+        }
+      } catch { /* 门禁判定失败不阻断就绪判定 */ }
+    }
+    goals.push({
+      id, title: doc.meta.title ?? id, status: String(doc.meta.status ?? ""),
+      ready: blockers.length === 0, blockers,
+      ...(link_blocked ? { link_blocked, waiting_for } : {}),
+    });
   }
-  return { version, goals, runnable: goals.filter((g) => g.ready).map((g) => g.id) };
+  return { version, goals, runnable: goals.filter((g) => g.ready).map((g) => g.id), link_blocked: linkBlocked };
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,13 +1639,222 @@ export function removeLink(root: string, id: string, actor: string): { ok: true;
   return { ok: true, removed: id };
 }
 
-/** 某目标的连线依赖（供派发前检查：start 连接要求前置目标已交付）。 */
-export function linkGates(root: string, goal: string): { blockedBy: GoalLink[]; note: GoalLink[] } {
-  const all = listLinks(root);
+/** 某目标的连线依赖（供派发前检查：start 连接要求前置目标已交付）。
+ *  [v0.30] links 可选：调用方已读过连线表时传入，避免逐目标重复读盘。 */
+export function linkGates(root: string, goal: string, links?: GoalLink[]): { blockedBy: GoalLink[]; note: GoalLink[] } {
+  const all = links ?? listLinks(root);
   return {
     blockedBy: all.filter((l) => l.to === goal && l.kind !== "mid"),
     note: all.filter((l) => (l.from === goal || l.to === goal) && l.kind === "mid"),
   };
+}
+
+// ---------------------------------------------------------------------------
+// [v0.30] 连线门禁：让画布上画的连线真正参与派发顺序
+//   —— 背景（真缺陷）：linkGates 已定义、host 已 import，但**从未被调用**，
+//      结果用户在画布上连的 start/end/mid 线完全不影响自动驾驶的派发顺序。
+//   语义（与画布产品语义对齐）：
+//   - start/end（阻塞型）：指向本目标的连线，另一端目标必须已 delivered（或已归档）
+//     才允许派发；未满足则本轮跳过并回队尾（等前置），不丢弃、不判失败。
+//   - mid（实时协作）：**不阻塞**派发，仅在派发简介里提示协作伙伴（请用 graph_collab_post 同步）。
+//   本模块只提供纯判定与材料整理；「回队尾 / 写事件 / 全阻塞收尾」在 host 派发循环里做。
+// ---------------------------------------------------------------------------
+
+/** 交付态判定所需的机器可读表格（一次扫描，避免逐目标重复 IO）。 */
+export interface DeliveryLookup {
+  /** 目标 id → 状态字符串（不含归档目标）。 */
+  status: Map<string, string>;
+  /** 已归档目标 id 集合（归档 = 历史完成，视作已交付）。 */
+  archived: Set<string>;
+}
+
+/**
+ * [v0.30] 扫描图根下全部目标（含归档），给出「谁已交付」的判定表。
+ * 与 findGoalFile 同一事实来源（loadGoal 的 meta），逐文件 try/catch 跳过半成品。
+ */
+export function deliveryLookup(root: string): DeliveryLookup {
+  const status = new Map<string, string>();
+  const archived = new Set<string>();
+  for (const f of listGoalFiles(root, { includeArchived: true })) {
+    try {
+      const doc = loadGoal(f);
+      const id = String(doc.meta.id ?? "").trim();
+      if (!id) continue;
+      if (doc.meta.archived === true) archived.add(id);
+      // 非归档的最新状态覆盖归档态（同一目标既在活跃区又在归档区时以活跃区为准）
+      if (doc.meta.archived !== true || !status.has(id)) status.set(id, String(doc.meta.status ?? ""));
+    } catch { /* 半成品跳过 */ }
+  }
+  return { status, archived };
+}
+
+/** [v0.30] 某目标是否已交付（delivered）或已归档。 */
+export function isDelivered(lookup: DeliveryLookup, goalId: string): boolean {
+  if (lookup.archived.has(goalId)) return true;
+  return lookup.status.get(goalId) === "delivered";
+}
+
+/** [v0.30] 一条阻塞型前置连线的门禁判定结果。 */
+export interface LinkGateCheck {
+  link: GoalLink;
+  /** 另一端目标 id（前置）。 */
+  from: string;
+  kind: "start" | "end";
+  /** 前置是否已交付/已归档。 */
+  satisfied: boolean;
+  /** 前置当前状态（拿不到时为 null）。 */
+  from_status: string | null;
+}
+
+/** [v0.30] 某目标的完整连线门禁现状（links_check / 派发循环共用同一判定）。 */
+export interface LinkGateReport {
+  goal: string;
+  /** 阻塞型前置（start/end）逐条判定：satisfied=false 的即「未交付的前置」。 */
+  blockedBy: LinkGateCheck[];
+  /** 未满足的前置（子集，便利字段）。 */
+  unsatisfied: LinkGateCheck[];
+  /** 实时协作伙伴连线（mid，不阻塞）。 */
+  note: GoalLink[];
+  /** true = 存在未满足的阻塞型前置（本轮不可派发）。 */
+  blocked: boolean;
+}
+
+/**
+ * [v0.30] 连线门禁现状：某目标是否被连线挡住、在等谁、哪些已满足。
+ * opts.lookup 可复用调用方的扫描结果（派发循环里每轮只扫一次）；opts.links 同理复用连线表。
+ */
+export function linkGateReport(root: string, goal: string, opts?: { lookup?: DeliveryLookup; links?: GoalLink[] }): LinkGateReport {
+  const g = String(goal ?? "").trim();
+  const lookup = opts?.lookup ?? deliveryLookup(root);
+  const gates = linkGates(root, g, opts?.links);
+  const blockedBy: LinkGateCheck[] = gates.blockedBy.map((l) => {
+    const kind = (l.kind === "start" || l.kind === "end" ? l.kind : "start") as "start" | "end";
+    return {
+      link: l,
+      from: l.from,
+      kind,
+      satisfied: isDelivered(lookup, l.from),
+      from_status: lookup.status.get(l.from) ?? null,
+    };
+  });
+  const unsatisfied = blockedBy.filter((c) => !c.satisfied);
+  return { goal: g, blockedBy, unsatisfied, note: gates.note, blocked: unsatisfied.length > 0 };
+}
+
+/** [v0.30] 派发简介素材：已交付的阻塞型前置 + 实时协作伙伴。 */
+export interface LinkBriefMaterial {
+  /** 已交付的 start/end 前置（【前置任务（已完成）】段）。 */
+  predecessors: { id: string; title: string; status: string; delivered_at: string | null }[];
+  /** 未交付的 start/end 前置（正常情况下派发前已被门禁拦下，这里作诊断用）。 */
+  waiting: { id: string; kind: string; title: string; status: string | null }[];
+  /** mid 连线上的协作伙伴目标（【实时协作伙伴】段）。 */
+  collab: { id: string; title: string; status: string | null; direction: "upstream" | "downstream" }[];
+}
+
+/**
+ * [v0.30] 组装派发简介所需的连线素材：前置完成情况 + 协作伙伴（含标题）。
+ * delivered_at 取事件流里该目标最近一次「进入 delivered」的时间戳（拿不到则 null）。
+ */
+export function linkBriefMaterial(
+  root: string,
+  goal: string,
+  opts?: { lookup?: DeliveryLookup; events?: GraphEvent[]; links?: GoalLink[] },
+): LinkBriefMaterial {
+  const lookup = opts?.lookup ?? deliveryLookup(root);
+  const gates = linkGates(root, goal, opts?.links);
+  const events = opts?.events ?? readEvents(root);
+  const deliveredAt = (id: string): string | null => {
+    let hit: string | null = null;
+    for (const e of events) {
+      if (e.goal !== id) continue;
+      if (e.event === "goal.transition" && String(e.details?.to ?? "") === "delivered") hit = e.ts ?? null;
+      if (e.event === "autopilot.goal_done") hit = hit ?? (e.ts ?? null);
+    }
+    return hit;
+  };
+  const titleOf = (id: string): string => {
+    try {
+      const doc = loadGoal(findGoalFile(root, id));
+      return String(doc.meta.title ?? id);
+    } catch { return id; }
+  };
+  const predecessors: LinkBriefMaterial["predecessors"] = [];
+  const waiting: LinkBriefMaterial["waiting"] = [];
+  for (const l of gates.blockedBy) {
+    const satisfied = isDelivered(lookup, l.from);
+    if (satisfied) {
+      predecessors.push({
+        id: l.from,
+        title: titleOf(l.from),
+        status: String(lookup.status.get(l.from) ?? "delivered"),
+        delivered_at: deliveredAt(l.from),
+      });
+    } else {
+      waiting.push({ id: l.from, kind: l.kind, title: titleOf(l.from), status: lookup.status.get(l.from) ?? null });
+    }
+  }
+  const collab: LinkBriefMaterial["collab"] = gates.note.map((l) => {
+    const other = l.from === goal ? l.to : l.from;
+    return {
+      id: other,
+      title: titleOf(other),
+      status: lookup.status.get(other) ?? null,
+      direction: (l.from === goal ? "downstream" : "upstream") as "upstream" | "downstream",
+    };
+  });
+  return { predecessors, waiting, collab };
+}
+
+/**
+ * [v0.30] 批量增连线（graph_ap_control links_bulk 的 core 侧实现）。
+ * 语义：逐条 addLink；已存在（from+to+kind 完全相同）记为 skipped（不算错误）；
+ * 非法条目（缺 from/to、自连）记入 errors 并继续处理其余条目（不整批失败）。
+ */
+export function addLinksBulk(
+  root: string,
+  links: { from?: unknown; to?: unknown; kind?: unknown; note?: unknown }[],
+  actor: string,
+): { ok: true; added: number; skipped: number; errors: { index: number; from: string; to: string; error: string }[]; links: GoalLink[] } {
+  const list = Array.isArray(links) ? links : [];
+  let added = 0;
+  let skipped = 0;
+  const errors: { index: number; from: string; to: string; error: string }[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const raw = list[i] ?? {};
+    const from = String((raw as any).from ?? "").trim();
+    const to = String((raw as any).to ?? "").trim();
+    try {
+      const out = addLink(root, { from, to, kind: String((raw as any).kind ?? "") as any, note: (raw as any).note ?? null }, actor);
+      if (out.created) added++;
+      else skipped++;
+    } catch (e) {
+      errors.push({ index: i + 1, from, to, error: String((e as any)?.message ?? e) });
+    }
+  }
+  return { ok: true, added, skipped, errors, links: listLinks(root) };
+}
+
+/**
+ * [v0.30] 当前因连线门禁而等待的目标（前端可见性 / state 端点用）。
+ * scope: 只传 goalIds 时逐个判定；不传时扫描全部**非归档**目标。
+ * 返回仅含「被挡住」的目标，waiting_for = 未交付前置的 id 列表（去重）。
+ */
+export function linkBlockedGoals(root: string, goalIds?: string[] | null): { goal: string; waiting_for: string[] }[] {
+  const lookup = deliveryLookup(root);
+  let ids: string[];
+  if (Array.isArray(goalIds) && goalIds.length) {
+    ids = goalIds.map((g) => String(g ?? "").trim()).filter(Boolean);
+  } else {
+    ids = [...lookup.status.keys()].filter((id) => !lookup.archived.has(id));
+  }
+  const out: { goal: string; waiting_for: string[] }[] = [];
+  for (const id of ids) {
+    const rep = linkGateReport(root, id, { lookup });
+    if (!rep.blocked) continue;
+    const waiting_for = [...new Set(rep.unsatisfied.map((c) => c.from))];
+    out.push({ goal: id, waiting_for });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

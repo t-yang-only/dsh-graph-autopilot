@@ -207,6 +207,13 @@ import {
   addLink,
   removeLink,
   linkGates,
+  // [v0.30] 连线门禁：画布连线真正参与派发顺序（判定表 / 门禁报告 / 简介素材 / 批量增线）
+  deliveryLookup,
+  isDelivered,
+  linkGateReport,
+  linkBriefMaterial,
+  addLinksBulk,
+  linkBlockedGoals,
   ensureGroups,
   listGroups,
   isDefaultGroup,
@@ -4800,8 +4807,61 @@ export function apply(ctx, config) {
     async function autopilotDispatchNext(root) {
       const r = autopilotRunners.get(root);
       if (!r || r.stopped || r.current || r.paused) return;
-      const nextId = r.queue.shift();
-      if (!nextId) { autopilotFinish(root, r, "queue-empty"); return; }
+      // [v0.30] 连线门禁（真缺陷修复）：画布上画的 start/end 连线此前**完全不影响派发顺序**
+      // （linkGates 已定义、已 import，但从未被调用）。现在每次取队首前先做门禁：
+      // 前置未交付 → 回队尾（不丢弃、不判失败）并写 autopilot.link_gate_wait；
+      // 整队都在等前置 → autopilotFinish("link-gate-blocked") + autopilot.lane_blocked_by_links。
+      // 判定表每轮只扫一次（deliveryLookup），避免逐目标重复读盘。
+      // 门禁自身只读、失败即放行（fail-open）：连线表/目标扫描出问题时退回旧的「直接取队首」行为，
+      // 绝不让一次读盘异常把整条泳道卡死（本函数在多处以 void 调用，抛错会变成无人接管的 rejection）。
+      let linkLookup = null;
+      let linkTable = [];
+      try {
+        linkLookup = deliveryLookup(root);
+        linkTable = listLinks(root);
+      } catch (e) {
+        autopilotLog(`连线门禁判定表读取失败（本轮按无门禁放行）：${String(e?.message ?? e)}`);
+      }
+      const gateOn = linkLookup !== null;
+      const gateWait = new Map(); // goalId -> [{from, kind}]（本轮等待原因，供「全阻塞」事件列出）
+      let nextId = null;
+      // 只扫「本轮开始时的队列长度」次：等前置的目标会回队尾，不设界会死循环。
+      let tries = r.queue.length;
+      while (tries-- > 0 && r.queue.length) {
+        const candidate = r.queue.shift();
+        let gate = null;
+        if (gateOn) {
+          try { gate = linkGateReport(root, candidate, { lookup: linkLookup, links: linkTable }); }
+          catch (e) { autopilotLog(`goal=${candidate} 连线门禁判定失败（按放行处理）：${String(e?.message ?? e)}`); }
+        }
+        if (!gate?.blocked) { nextId = candidate; break; }
+        const blocked_by = gate.unsatisfied.map((c) => ({ from: c.from, kind: c.kind }));
+        gateWait.set(candidate, blocked_by);
+        appendEvent(root, {
+          actor: "system:autopilot",
+          event: "autopilot.link_gate_wait",
+          goal: candidate,
+          details: { goal: candidate, blocked_by, version: r.version },
+        });
+        autopilotLog(`goal=${candidate} 连线门禁：等待前置 ${blocked_by.map((b) => `${b.from}(${b.kind})`).join("、")} 交付 —— 回队尾等待`);
+        r.queue.push(candidate); // 放回队尾：不丢弃，等前置交付后自然会再轮到
+      }
+      if (!nextId) {
+        if (gateWait.size) {
+          // 整队都在等前置：收尾并写明每个目标在等谁（避免空转饿死）
+          const blocked = [...gateWait.entries()].map(([goal, waiting]) => ({ goal, waiting_for: [...new Set(waiting.map((w) => w.from))] }));
+          appendEvent(root, {
+            actor: "system:autopilot",
+            event: "autopilot.lane_blocked_by_links",
+            details: { version: r.version, blocked },
+          });
+          autopilotLog(`泳道 ${r.version} 全部目标被连线门禁挡住：${blocked.map((b) => `${b.goal} ← ${b.waiting_for.join("、")}`).join("；")}`);
+          autopilotFinish(root, r, "link-gate-blocked");
+          return;
+        }
+        autopilotFinish(root, r, "queue-empty");
+        return;
+      }
       const st = readAutopilotState(root);
       const controller = new AbortController();
       r.current = { goalId: nextId, controller, startedAt: new Date().toISOString() };
@@ -4880,6 +4940,33 @@ export function apply(ctx, config) {
           briefParts.push("【开工纪律】改动文件前用 graph_collab_post 声明你要动的文件（claims 参数），避免与并行任务冲突；收工用 graph_collab_post 发 kind=release 释放声明。");
         }
       } catch { /* 协作频道不可用不阻断派发 */ }
+      // [v0.30] 连线上下文：前置任务（已交付的 start/end 连线另一端）+ 实时协作伙伴（mid 连线）
+      // —— 画布连线此前不影响派发，现在既做门禁（见 autopilotDispatchNext），也进简介让执行子代理
+      //    知道「我依赖谁已完成、我和谁要实时同步」。
+      try {
+        const mat = linkBriefMaterial(root, nextId, { lookup: linkLookup, links: linkTable });
+        if (mat.predecessors.length) {
+          briefParts.push(
+            `【前置任务（已完成）】以下目标与本任务有开始/结束连线，且已交付——本任务可直接依赖其产出（如需细节可读该目标目录或协作频道）：\n` +
+            mat.predecessors.map((p) => `- ${p.id} ${p.title}（交付于 ${p.delivered_at ?? "时间未记录"}）`).join("\n"),
+          );
+        }
+        if (mat.waiting.length) {
+          // 正常路径不该出现（门禁会先拦下）；这里作诊断兜底，避免「静默无提示」
+          briefParts.push(
+            `【前置任务（尚未交付，注意）】以下目标与本任务有开始/结束连线但**尚未交付**：\n` +
+            mat.waiting.map((w) => `- ${w.id} ${w.title}（当前状态：${w.status ?? "未知"}）`).join("\n") +
+            `\n若本任务确实依赖它们，请先确认其产出是否可用；必要时用 graph_collab_post 与相关任务沟通，不要凭空假设其已完成。`,
+          );
+        }
+        if (mat.collab.length) {
+          briefParts.push(
+            `【实时协作伙伴】以下目标与本任务实时协作（请用 graph_collab_post 保持同步）：\n` +
+            mat.collab.map((c) => `- ${c.id} ${c.title}${c.status ? `（当前状态：${c.status}）` : ""}`).join("\n") +
+            `\n开工时先 graph_collab_read 看对方近况；改动共享资源前先 graph_collab_post 声明（claims），收工发 kind=release。`,
+          );
+        }
+      } catch { /* 连线上下文不可用不阻断派发 */ }
       // [v0.25] 按泳道选模型：本目标的泳道若配置了模型路由，覆盖全局 executor 配置
       let laneModelOverride = {};
       try {
@@ -5119,13 +5206,14 @@ export function apply(ctx, config) {
       // [v0.19] 主对话全控：一个工具覆盖自驾/泳道提示词/回收站/协作/管理员/目录的全部操作
       apControl: {
         name: "graph_ap_control",
-            description: "[autopilot] 主对话控制看板一切：泳道职责提示词、回收站（列出/恢复/彻底删除/回草稿）、协作频道、推荐与完整扫描、全局目标与全局提示词、评审模式、推荐管理员、目标推进与全局托管、技能与预设目录、当前状态。",
+            description: "[autopilot] 主对话控制看板一切：泳道职责提示词、回收站（列出/恢复/彻底删除/回草稿）、协作频道、推荐与完整扫描、全局目标与全局提示词、评审模式、推荐管理员、目标推进与全局托管、技能与预设目录、任务连线（判读/单个增删/批量编排）、当前状态。",
             parameters: params({
               action: {
                 type: "string",
-                description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|steward_set|advance_mode_set|catalog_list|settings_get|settings_set|status",
+                description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|steward_set|advance_mode_set|catalog_list|settings_get|settings_set|links_list|links_add|links_remove|links_check|links_bulk|status",
               },
-          settings: { type: "object", description: "[v0.28] settings_set 的设置对象（看板设置）：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels/advanceMode/steward({enabled})。profile 级设置（subagentProvider/subagentModel/subagentMode/subagentReasoningEffort/subagentPrompt/promptLanguage）由 DSH 设置页写入，本 action 不写并会在 skipped 里说明。" },
+              links: { type: "array", description: "[v0.30] links_bulk：要新增的连线数组 [{from, to, kind}]（kind: start=开始连接 / end=结束连接 / mid=实时协作）。已存在（同 from+to+kind）记为 skipped 不算错误；非法条目进 errors 并继续处理其余条目。" },
+              settings: { type: "object", description: "[v0.28] settings_set 的设置对象（看板设置）：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels/advanceMode/steward({enabled})。profile 级设置（subagentProvider/subagentModel/subagentMode/subagentReasoningEffort/subagentPrompt/promptLanguage）由 DSH 设置页写入，本 action 不写并会在 skipped 里说明。" },
           lane: { type: "string", description: "泳道键（版本 slug / standalone / backlog / *）" },
           text: { type: "string", description: "文本（提示词 / 协作消息 / 全局目标 / 全局提示词）" },
           goal: { type: "string" }, dir: { type: "string" }, version: { type: "string" },
@@ -5314,6 +5402,36 @@ export function apply(ctx, config) {
             }
             case "links_list": return { ok: true, links: listLinks(root, a.goal ?? null) };
             case "links_add": return { ok: true, ...addLink(root, { from: String(a.from ?? ""), to: String(a.to ?? ""), kind: a.kind, note: a.note ?? null }, autopilotActor(ex)) };
+            // [v0.30] 只读排查：该目标的连线门禁现状（谁已满足、谁未满足）——回答「为什么这个任务不跑」
+            case "links_check": {
+              const goal = String(a.text ?? a.goal ?? "").trim();
+              if (!goal) return { ok: false, error: "links_check 需要 text（目标 id）" };
+              const rep = linkGateReport(root, goal);
+              return {
+                ok: true,
+                goal: rep.goal,
+                blocked: rep.blocked,
+                blockedBy: rep.blockedBy.map((c) => ({
+                  from: c.from,
+                  kind: c.kind,
+                  satisfied: c.satisfied,
+                  from_status: c.from_status,
+                  note: c.link.note ?? null,
+                })),
+                waiting_for: [...new Set(rep.unsatisfied.map((c) => c.from))],
+                collab: rep.note.map((l) => (l.from === goal ? `-> ${l.to}` : `<- ${l.from}`)),
+                hint: rep.blocked
+                  ? `该目标本轮不可派发：等待 ${[...new Set(rep.unsatisfied.map((c) => c.from))].join("、")} 交付（或删除对应 start/end 连线）。`
+                  : "连线门禁已满足（或该目标没有阻塞型连线），可正常派发。",
+              };
+            }
+            // [v0.30] 批量编排连线：links: [{from,to,kind}]，已存在记为 skipped 不算错误
+            case "links_bulk": {
+              const arr = Array.isArray(a.links) ? a.links : [];
+              if (!arr.length) return { ok: false, error: "links_bulk 需要 links（[{from,to,kind}] 数组）" };
+              const out = addLinksBulk(root, arr, autopilotActor(ex));
+              return { ok: true, added: out.added, skipped: out.skipped, errors: out.errors, links: out.links };
+            }
             case "links_remove": return { ok: true, ...removeLink(root, String(a.id ?? ""), autopilotActor(ex)) };
             case "lane_model_set": {
               const st0 = readAutopilotState(root);
@@ -5358,6 +5476,13 @@ export function apply(ctx, config) {
             const body = req.method === "POST" ? await readBody(req) : {};
             const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
             const r = autopilotRunners.get(root) ?? null;
+            // [v0.30] link_blocked：当前因连线门禁（start/end 连线前置未交付）而等待的目标与它在等谁。
+            // 没有任何连线时跳过整轮目标扫描（该端点被看板轮询，保持零额外开销）。
+            let linkBlocked = [];
+            try {
+              const anyBlockingLink = listLinks(root).some((l) => l.kind === "start" || l.kind === "end");
+              if (anyBlockingLink) linkBlocked = linkBlockedGoals(root);
+            } catch { /* 门禁可见性失败不阻断 state 端点 */ }
             json(res, 200, {
               ok: true,
               state: readAutopilotState(root),
@@ -5365,6 +5490,7 @@ export function apply(ctx, config) {
               recommendations: readRecommendations(root),
               archived: listArchived(root),
               delivered: listDelivered(root),
+              link_blocked: linkBlocked,
             });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },
@@ -5605,15 +5731,32 @@ export function apply(ctx, config) {
             const body = await readBody(req);
             const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
             const action = String(body.action ?? "list");
-            if (action === "list") return json(res, 200, { ok: true, links: listLinks(root, body.goal ?? null) });
+            // [v0.30] 每条连线附带 from_delivered/to_delivered（按目标 status 判断，归档视作已交付），
+            // 让前端能标注「前置已满足」。判定表一次扫描、整份清单复用。
+            const withDelivery = (links) => {
+              let lookup = null;
+              try { lookup = deliveryLookup(root); } catch { /* 扫描失败则一律按未交付标注 */ }
+              return links.map((l) => ({
+                ...l,
+                from_delivered: lookup ? isDelivered(lookup, l.from) : false,
+                to_delivered: lookup ? isDelivered(lookup, l.to) : false,
+              }));
+            };
+            if (action === "list") return json(res, 200, { ok: true, links: withDelivery(listLinks(root, body.goal ?? null)) });
             if (action === "add") {
               const out = addLink(root, { from: body.from, to: body.to, kind: body.kind, note: body.note }, "human:gui");
-              return json(res, 200, { ok: true, ...out, links: listLinks(root) });
+              return json(res, 200, { ok: true, ...out, links: withDelivery(listLinks(root)) });
             }
             if (action === "remove") {
               if (!body.id) return json(res, 400, { error: "missing id" });
               removeLink(root, String(body.id), "human:gui");
-              return json(res, 200, { ok: true, links: listLinks(root) });
+              return json(res, 200, { ok: true, links: withDelivery(listLinks(root)) });
+            }
+            // [v0.30] 批量编排：links: [{from, to, kind}]（已存在记为 skipped，不算错误）
+            if (action === "add_bulk" || action === "bulk") {
+              if (!Array.isArray(body.links) || body.links.length === 0) return json(res, 400, { error: "missing links（[{from,to,kind}] 数组）" });
+              const out = addLinksBulk(root, body.links, "human:gui");
+              return json(res, 200, { ok: true, added: out.added, skipped: out.skipped, errors: out.errors, links: withDelivery(out.links) });
             }
             return json(res, 400, { error: `未知 action：${action}` });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }

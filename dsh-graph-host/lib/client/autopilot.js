@@ -166,27 +166,32 @@ function AutopilotPanel(props) {
   apPanelWorkspace = workspace;
   const [st, setSt] = React.useState(null);
   const [versions, setVersions] = React.useState([]);
+  // ⚠️ [v0.30] 以下「运行数据 / 输入草稿」**刻意不持久化**（重启会显示过期内容或错误草稿）：
+  //    goalText/promptText（服务端真源，load() 拉回）、picked/runVersion（依赖当下服务端数据）、
+  //    busy/msg（瞬时）、mgr/mgrPrompt（服务端 managerPrompt 为真源）、recHint（一次性输入）、
+  //    laneText/lanePrompts（服务端真源 + 正在编辑的草稿）。只有用户显式选的界面开关才落盘。
   const [goalText, setGoalText] = React.useState("");
   const [promptText, setPromptText] = React.useState("");
-  const [promptOpen, setPromptOpen] = React.useState(false);
+  const [promptOpen, setPromptOpen] = apUsePersistedState("prompt-open", false); // [v0.30] 持久化：全局提示词展开
   const [picked, setPicked] = React.useState({});
   const [runVersion, setRunVersion] = React.useState("");
   const [busy, setBusy] = React.useState("");
   const [msg, setMsg] = React.useState("");
-  const [showArch, setShowArch] = React.useState(false);
+  const [showArch, setShowArch] = apUsePersistedState("show-arch", false); // [v0.30] 持久化：归档清单展开
   // [v0.18] 推荐管理员 + 协作频道
   const [mgr, setMgr] = React.useState(null);
   const [mgrPrompt, setMgrPrompt] = React.useState("");
   const [recHint, setRecHint] = React.useState(""); // [v0.19] 按输入内容推荐
-  const [laneSel, setLaneSel] = React.useState("");
+  const [laneSel, setLaneSel] = apUsePersistedState("lane-sel", ""); // [v0.30] 持久化：泳道职责下拉选择
   const [laneText, setLaneText] = React.useState("");
   const [lanePrompts, setLanePrompts] = React.useState({});
-  const [laneOpen, setLaneOpen] = React.useState(false);
+  const [laneOpen, setLaneOpen] = apUsePersistedState("lane-open", false); // [v0.30] 持久化：泳道职责编辑展开
   // [v0.27] 推荐列表折叠开关（默认展开；折叠时只留「条数 + 提示」一行摘要）
-  const [recsOpen, setRecsOpen] = React.useState(true);
-  const [mgrOpen, setMgrOpen] = React.useState(false);
+  // [v0.30] recsOpen/mgrOpen 已持久化：刷新后保留「收起/展开」的选择（用户要求按键有记忆性）
+  const [recsOpen, setRecsOpen] = apUsePersistedState("recs-open", true);
+  const [mgrOpen, setMgrOpen] = apUsePersistedState("mgr-open", false);
   const [collab, setCollab] = React.useState({ messages: [], claims: [] });
-  const [collabOpen, setCollabOpen] = React.useState(false);
+  const [collabOpen, setCollabOpen] = apUsePersistedState("collab-open", false); // [v0.30] 持久化：协作频道展开
   const [collabText, setCollabText] = React.useState("");
   // 拖拽协议（模块作用域函数）在 React 之外执行 → 结果回显走这个注册出口
   apNoticeSink = setMsg;
@@ -256,6 +261,16 @@ function AutopilotPanel(props) {
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
   }, [running, st?.runner?.current, (st?.runner?.pending ?? []).length, load]);
+
+  // [v0.30] laneSel/laneOpen 持久化后的恢复兜底：重启回来时编辑框必须显示该泳道**已保存**的职责，
+  // 否则出现「已设置」标签 + 空编辑框，用户一点「保存泳道职责」就会把服务端已存的文本清掉（静默数据丢失）。
+  // 仅在用户没在本泳道里动过草稿时自动回填（laneText 本身是草稿，按边界说明不落盘）。
+  const laneDraftTouchedRef = React.useRef(false);
+  React.useEffect(() => { laneDraftTouchedRef.current = false; }, [laneSel]);
+  React.useEffect(() => {
+    if (!laneSel || laneDraftTouchedRef.current) return;
+    setLaneText(lanePrompts[laneSel] ?? "");
+  }, [laneSel, lanePrompts]);
 
   const post = (path, body) => {
     setBusy(path);
@@ -584,7 +599,8 @@ function AutopilotPanel(props) {
         value: laneText,
         // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         placeholder: "例如：本泳道负责服务端接口与数据层；改动需同时给出接口签名与兼容性说明。留空保存=清除。",
-        onChange: (e) => setLaneText(e.target.value),
+        // [v0.30] 用户已在本泳道动过草稿 → 后续 lanePrompts 刷新不得再回填覆盖（含「清空后保存」场景）
+        onChange: (e) => { laneDraftTouchedRef.current = true; setLaneText(e.target.value); },
       }),
       h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
         h("button", {
@@ -594,6 +610,7 @@ function AutopilotPanel(props) {
             return load();
           }),
         }, "保存泳道职责"),
+        // i18n-keep(category-a)：面板内说明文案，按项目约定保留中文（不新增 i18n 词条）。
         h("span", { style: { opacity: 0.6, fontSize: 11 } }, "派发该泳道任务时会注入这条提示词"),
       ),
     ),
@@ -689,7 +706,7 @@ function TemplateLane(props) {
   const [form, setForm] = React.useState(null); // {id?, title, type, description, criteriaText}
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState("");
-  const [collapsed, setCollapsed] = React.useState(true); // 默认折叠：不占位置
+  const [collapsed, setCollapsed] = apUsePersistedState("tpl-collapsed", true); // [v0.30] 持久化（默认 true=折叠：不占位置）
   const [refreshing, setRefreshing] = React.useState(false);
   // [v0.29] 问题 9：本行现在也承接**看板卡片**拖入（卡片拖拽由看板 React 状态驱动，不是 apDragPick）
   const [goalHover, setGoalHover] = React.useState(false);
@@ -875,6 +892,76 @@ function TemplateLane(props) {
 // 回收站行（看板最底部）：已归档目标 + 已移除版本，均可一键恢复；可折叠 + 实时刷新
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+// [v0.30] 界面开关持久化：用户**显式选择**的状态（折叠/展开、开关、下拉选择）跨刷新/重启保留。
+// 起因：用户要求「所有的按键都要有记忆性，不能每次重启都不保留功能的启用状态」——
+// 这些开关原来都是临时 React.useState，刷新即回默认值。
+//
+// ⚠️ 持久化边界（以后加状态前先读这里，别乱加）：
+//   只有「用户显式选择的界面状态」才用 apUsePersistedState。
+//   以下三类**一律不要持久化**（否则会出现「重启后显示过期/错误内容」）：
+//     ① 服务端数据（真源在服务端）：st / versions / mgr / lanePrompts / collab / items / data；
+//     ② 瞬时运行时状态：busy / msg / refreshing / purgePending / hover / goalHover /
+//        form / pointer / hoverCard / hoverLink / tick，以及 LinksLayer 的
+//        mode / pending（连线是一次性交互：重启后停在线连模式会拦住卡片点击）；
+//     ③ 正在编辑的输入草稿：goalText / promptText / laneText / collabText / recHint /
+//        mgrPrompt / runVersion / picked（会话内选择，依赖服务端当下的数据）。
+//   特例：mgrPrompt 以服务端 managerPrompt 为真源，草稿不落盘（重启读到服务端最新值）。
+// ---------------------------------------------------------------------------
+const AP_PERSIST_PREFIX = "dsh-graph.ap.";
+/** 状态名 → localStorage 键（统一命名空间，便于排查/一次性清理） */
+function apPersistKey(name) { return AP_PERSIST_PREFIX + String(name ?? ""); }
+/** 读布尔开关：容错——无 localStorage / 值损坏 / 任何异常 → 回落 dflt，绝不抛 */
+function apReadFlag(name, dflt) {
+  const d = !!dflt;
+  try {
+    const raw = localStorage.getItem(apPersistKey(name));
+    if (raw == null || raw === "") return d;
+    if (raw === "1" || raw === "true") return true;
+    if (raw === "0" || raw === "false") return false;
+    const v = JSON.parse(raw);
+    return typeof v === "boolean" ? v : !!v;
+  } catch { return d; }
+}
+/** 写布尔开关（按 JSON 布尔存；同 apWriteJson 的容错） */
+function apWriteFlag(name, v) { apWriteJson(name, !!v); }
+/** 读 JSON 值（对象/数组/字符串/数字/布尔）：容错同上，损坏时回落 dflt */
+function apReadJson(name, dflt) {
+  try {
+    const raw = localStorage.getItem(apPersistKey(name));
+    if (raw == null || raw === "") return dflt;
+    const v = JSON.parse(raw);
+    return v === undefined || v === null ? dflt : v;
+  } catch { return dflt; }
+}
+/** 写 JSON 值：v === undefined → 删键；循环引用/超配额/无 localStorage → 静默忽略 */
+function apWriteJson(name, v) {
+  try {
+    const key = apPersistKey(name);
+    if (v === undefined) { localStorage.removeItem(key); return; }
+    localStorage.setItem(key, JSON.stringify(v));
+  } catch { /* 忽略：持久化失败不影响内存态 */ }
+}
+/**
+ * [v0.30] 带持久化的 useState：用法与 useState 完全一致（含函数式更新 set(v => ...)），
+ * 差异只有两条：① 初值先读 localStorage，读到了就用、读不到（或损坏）用 dflt；
+ *             ② 每次 set 同步写回 localStorage。
+ * 只给「用户显式选择的状态」用；服务端数据 / 运行时数据 / 输入草稿一律不要用（见上方边界说明）。
+ */
+function apUsePersistedState(name, dflt) {
+  const [v, setV] = React.useState(() => apReadJson(name, dflt));
+  // ref 跟住最新值：同一 tick 内连续函数式更新也不会读到过期闭包
+  const vRef = React.useRef(v);
+  vRef.current = v;
+  const set = (x) => {
+    const next = typeof x === "function" ? x(vRef.current) : x;
+    vRef.current = next;
+    setV(next);
+    apWriteJson(name, next);
+  };
+  return [v, set];
+}
+
+// ---------------------------------------------------------------------------
 // [v0.25] 无提示模式：一键隐藏所有帮助性说明（.dg-hint 段落）
 // ---------------------------------------------------------------------------
 const AP_NO_HINTS_KEY = "dsh-graph.no-hints";
@@ -915,7 +1002,7 @@ function apTrashDragEnd() { apTrashDragKey = null; }
 function TrashLane(props) {
   const workspace = props?.workspace ?? null;
   const [data, setData] = React.useState({ goals: [], versions: [] });
-  const [collapsed, setCollapsed] = React.useState(true); // 默认折叠
+  const [collapsed, setCollapsed] = apUsePersistedState("trash-collapsed", true); // [v0.30] 持久化（默认 true=折叠）
   const [refreshing, setRefreshing] = React.useState(false);
   const [busy, setBusy] = React.useState("");
   const [msg, setMsg] = React.useState("");
@@ -1321,6 +1408,9 @@ function LinksLayer(props) {
   const workspace = props?.workspace ?? null;
   if (workspace) apPanelWorkspace = workspace;
   const [links, setLinks] = React.useState([]);
+  // [v0.30] mode/pending **刻意不持久化**（不是「用户显式选择的状态」，而是瞬时交互态）：
+  // 连线类型由「点卡片上/中/下部」实时推导，没有「最近一次用的连线类型」这类选择态（故无 link-kind 键）；
+  // mode 若持久化，重启后会停在连线模式并拦住卡片点击 —— 属功能故障，不是记忆性。
   const [mode, setMode] = React.useState("idle"); // idle | link | erase
   const [pending, setPending] = React.useState(null); // { id, kind }
   const [tick, setTick] = React.useState(0);

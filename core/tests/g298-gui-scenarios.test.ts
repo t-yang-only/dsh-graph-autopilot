@@ -50,20 +50,23 @@ test("g-298 拖拽场景：HTML5 拖拽 API 源码契约", () => {
 test("g-298 折叠场景：泳道折叠/展开源码契约", () => {
   // 折叠功能必须支持泳道和列的折叠/展开
 
-  // 1. 折叠状态存储（使用 React state）
-  assert.match(kanbanSource, /const \[collapsedLanes, setCollapsedLanes\] = React\.useState\(\{\}\)/);
+  // 1. 折叠状态存储（使用 React state；v0.30 起初值惰性读持久化的**用户显式选择**）
+  assert.match(kanbanSource, /const \[collapsedLanes, setCollapsedLanes\] = React\.useState\(\(\) => readPersistedBoolMap\(PK_COLLAPSED_LANES\)\)/);
 
   // 2. 阻塞列默认折叠
-  assert.match(kanbanSource, /const \[blockedColumnCollapsed, setBlockedColumnCollapsed\] = React\.useState\(true\)/);
+  assert.match(kanbanSource, /const \[blockedColumnCollapsed, setBlockedColumnCollapsed\] = React\.useState\(\(\) => readPersistedBool\(PK_BLOCKED_COLUMN, true\)\)/);
 
   // 3. 交付列默认展开
-  assert.match(kanbanSource, /const \[deliverColumnCollapsed, setDeliverColumnCollapsed\] = React\.useState\(false\)/);
+  assert.match(kanbanSource, /const \[deliverColumnCollapsed, setDeliverColumnCollapsed\] = React\.useState\(\(\) => readPersistedBool\(PK_DELIVER_COLUMN, false\)\)/);
 
   // 4. 折叠状态判断
   assert.match(kanbanSource, /const isCollapsed = collapsible && !!collapsedLanes\[key\]/);
 
-  // 5. 折叠状态持久化（可选）
-  // assert.match(kanbanSource, /localStorage|sessionStorage/);
+  // 5. 折叠状态持久化（v0.30 起为**必选**：用户显式折叠/展开的选择重启后保留）。
+  //    仍然要求折叠态由 React state 持有（不是外部可变对象）；存储只经统一出口。
+  assert.match(kanbanSource, /writePersistedJson\(PK_COLLAPSED_LANES, next\)/);
+  assert.match(kanbanSource, /writePersistedJson\(PK_BLOCKED_COLUMN, /);
+  assert.match(kanbanSource, /writePersistedJson\(PK_DELIVER_COLUMN, /);
 });
 
 // ===== 3. 懒加载场景契约 =====

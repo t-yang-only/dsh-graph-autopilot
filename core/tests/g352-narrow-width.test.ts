@@ -505,20 +505,27 @@ test("g-352 判据7：无活跃版本 / 选中版本失效 / 拉回全宽均安�
   assert.match(kanban, /const viewBacklogOnly = !!\(narrowSingleTier && !searchActiveQuery/);
 });
 
-test("g-352 判据7：单版本选中不另建状态真源（零持久化键，仅派生映射既有可见性）", () => {
+test("g-352 判据7：单版本选中不另建**可见性**状态真源（v0.30：可记忆「用户显式选择」，但绝不能成为可见性底账）", () => {
   const kanban = readClient("kanban");
-  // 选中态只是组件内 React state
-  assert.match(kanban, /const \[viewVersionSlug, setViewVersionSlug\] = React\.useState\(null\);/);
-  // 零持久化：本目标不新增任何存储读写（隐藏状态唯一持久真源仍是 useHiddenVersionSlugs）
-  assert.doesNotMatch(kanban, /localStorage|sessionStorage/, "单版本选中不得落任何持久化存储");
-  // 排期选择器（本次放开的组件）同样零持久化新增
+  // ① 选中态仍是组件内 React state（v0.30 起初值惰性读持久化 ⇒ 记「用户显式选过哪一项」）。
+  //    旧断言逐字钉 `React.useState(null)`（零持久化）；v0.30 按负责人要求给「用户显式选择」
+  //    加记忆性 ⇒ 初值由字面量 null 改为读 PK_VIEW_VERSION。判别力不降反升：下面三条把
+  //    「不得变成第二条可见性真源」这件事**从『没有持久化』升级为『持久化不得进入可见性推导』**。
+  assert.match(kanban, /const \[viewVersionSlug, setViewVersionSlugRaw\] = React\.useState\(\(\) => \{/);
+  assert.match(kanban, /readPersistedJson\(PK_VIEW_VERSION, null\)/);
+  // ② 记忆键存在且只记「视图选择」这一件事（不是可见性底账）：
+  assert.match(kanban, /const PK_VIEW_VERSION = "view-version"/);
+  // ③ **可见性推导仍只由既有两份来源决定**（持久底账 + 搜索临时覆盖层）——视图选择键
+  //    绝不出现在可见性推导里（这是判据 7 的真正内核：不另建可见性真源）。
+  assert.match(kanban, /const hiddenVersionSet = computeEffectiveHiddenVersionSlugs\(hiddenVersionSlugs, searchUnhiddenSlugs\);/);
+  assert.match(kanban, /const active = allActiveVersions\.filter\(\(v\) => !hiddenVersionSet\.has\(v\.slug\)\);/);
+  assert.doesNotMatch(kanban, /hiddenVersionSet[\s\S]{0,200}viewVersionSlug/, "视图选择不得参与 hiddenVersionSet 推导");
+  assert.doesNotMatch(kanban, /viewVersionSlug[\s\S]{0,120}computeEffectiveHiddenVersionSlugs/, "视图选择不得参与可见性计算");
+  // ④ 排期选择器（本次放开的组件）仍零持久化新增（记忆性只落在看板侧的视图选择上）
   const card = readClient("card");
   const selectorSrc = card.slice(card.indexOf("function VersionSelectorButton("), card.indexOf("// 目标卡：只保留关键信息"));
   assert.ok(selectorSrc.length > 0, "card.js 含 VersionSelectorButton 源片段");
   assert.doesNotMatch(selectorSrc, /localStorage|sessionStorage/);
-  // 可见性仍由既有两份既有来源共同决定（持久底账 + 搜索临时覆盖层），单版本只在其上再收窄
-  assert.match(kanban, /const hiddenVersionSet = computeEffectiveHiddenVersionSlugs\(hiddenVersionSlugs, searchUnhiddenSlugs\);/);
-  assert.match(kanban, /const active = allActiveVersions\.filter\(\(v\) => !hiddenVersionSet\.has\(v\.slug\)\);/);
 });
 
 // ============================================================ 判据 9：硬约束不破坏

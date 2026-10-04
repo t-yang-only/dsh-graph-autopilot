@@ -34,19 +34,40 @@
       const [createNote, setCreateNote] = React.useState(null);
       const [creating, setCreating] = React.useState(false);
       // g-110: 显示已归档目标的开关
-      const [showArchived, setShowArchived] = React.useState(false);
+      // [v0.30] 记忆性：初值惰性读持久化（用户显式勾选过就恢复；缺失/损坏回落 false）；
+      // 写入统一走本地 setShowArchived 包装（勾选框唯一入口，不散落）。
+      const [showArchived, setShowArchivedRaw] = React.useState(() => readPersistedBool(PK_SHOW_ARCHIVED, false));
+      const setShowArchived = (v) => {
+        const next = !!v;
+        setShowArchivedRaw(next);
+        writePersistedJson(PK_SHOW_ARCHIVED, next);
+      };
       // g-105: 记忆管理弹窗状态
       const [showMemoryModal, setShowMemoryModal] = React.useState(false);
       const memoryModalGuard = useBackdropClose(() => setShowMemoryModal(false));
       // g-187：顶部多选标签筛选；选中多个标签时采用 OR。
-      const [tagFilter, setTagFilter] = React.useState([]);
+      // [v0.30] 记忆性：初值惰性读持久化（用户显式选过标签就恢复；损坏回落 []）；
+      // 写入统一走本地 setTagFilter 包装（点选/清除两处入口都经它）。
+      const [tagFilter, setTagFilterRaw] = React.useState(() => readPersistedStrArray(PK_TAG_FILTER));
+      const setTagFilter = (v) => {
+        const next = Array.isArray(v) ? [...new Set(v.map(String).filter(Boolean))] : [];
+        setTagFilterRaw(next);
+        writePersistedJson(PK_TAG_FILTER, next);
+      };
       const [showTagFilterModal, setShowTagFilterModal] = React.useState(false);
       const tagFilterGuard = useBackdropClose(() => setShowTagFilterModal(false));
       const tagsFor = (g) => Array.isArray(g?.tags) ? g.tags : [];
       const matchesTag = (g) => !tagFilter.length || tagsFor(g).some((tag) => tagFilter.includes(String(tag)));
       // [v0.27] 问题 17：按「类型」筛选（feature/bug/task/improvement/patch/chore，多选）。
       // 与标签筛选是「与」关系：同时激活时必须同时满足；与搜索命中/已归档过滤叠加生效。
-      const [typeFilter, setTypeFilter] = React.useState([]);
+      // [v0.30] 记忆性：初值惰性读持久化（用户显式选过类型就恢复；损坏回落 []）；
+      // 写入统一走本地 setTypeFilter 包装（点选/清除两处入口都经它）。
+      const [typeFilter, setTypeFilterRaw] = React.useState(() => readPersistedStrArray(PK_TYPE_FILTER));
+      const setTypeFilter = (v) => {
+        const next = Array.isArray(v) ? [...new Set(v.map(String).filter(Boolean))] : [];
+        setTypeFilterRaw(next);
+        writePersistedJson(PK_TYPE_FILTER, next);
+      };
       const matchesType = (g) => !typeFilter.length || typeFilter.includes(normalizeGoalType(g?.type));
       // [v0.27] 问题 22：目标卡片操作区「→ 草稿」——回收站行（autopilot.js）的同类按钮不带 force，
       // 带 cards/attempts 附件的目标会被后端拒绝；这里从看板卡片直接走 force 路径
@@ -87,7 +108,17 @@
         ".dg-draft-wrap{position:relative}",
         ".dg-live-dot{position:absolute;top:3px;right:4px;width:8px;height:8px;border-radius:50%;background:#3ddc84;border:1px solid rgba(0,0,0,.35);box-shadow:0 0 5px rgba(61,220,132,.85);pointer-events:none;z-index:4;animation:dg-live-breathe 1.1s ease-in-out infinite}",
         "@keyframes dg-live-breathe{0%,100%{opacity:.25}50%{opacity:1}}",
+        // [v0.30] 连线角标：左上角（右上角是绿点 ⇒ 不重叠）；同样不拦截点击。
+        // 角标自身样式内联在 renderLinkBadge 里（工厂作用域，便于单测），此处只保留类名钩子。
+        ".dg-link-badge{pointer-events:none}",
       ].join("");
+      // [v0.30] 连线角标：linkInfoMap 是「每 8 秒轮询 links」派生的**只读查表**，goalId → 标题
+      // 也从看板 payload 派生（各 lane 的 goals 带 title；查不到就显示 id）。两者都在渲染期间
+      // 由 withDraftAction 读取 ⇒ 用 ref 兜住声明顺序（withDraftAction 定义在文件顶部，而
+      // map/标题表在下方才算出），每次渲染前刷新 ref.current。
+      const linkInfoMapRef = React.useRef(new Map());
+      const linkTitleByIdRef = React.useRef(new Map());
+      const linkTitleOf = (id) => linkTitleByIdRef.current.get(String(id)) ?? null;
       const withDraftAction = (cardEl) => {
         const goalId = cardEl?.props?.["data-goal-id"]; // Card 根节点 data-goal-id 即目标 id
         if (!cardEl || !goalId) return cardEl;
@@ -115,7 +146,15 @@
               title: "该目标有子进程正在运行（见「任务执行板」）",
             })
           : null;
-        return h("div", { key: cardEl.key ?? goalId, className: "dg-draft-wrap", style: { minWidth: 0 } }, liveDot, cardEl, actionRow);
+        // [v0.30] 连线角标：同样是包裹层的子节点（**不新增 Card 调用点**、不动 .dg-card 元素），
+        // 绝对定位到卡片**左上角**（右上角是绿点 ⇒ 两者互不重叠）。
+        // 取值：调用点已把 linkInfo 作为新 prop 传进 Card（契约通路）；但 Card 的根元素只显式挂
+        // data-goal-id 等固定 props、**不转发第一个入参的任意字段**，故实际渲染读的是同一份
+        // 权威查表 linkInfoMapRef（与旁边绿点读 liveChildGoals 完全同模式）。undefined / 全 0
+        // 时 renderLinkBadge 返回 null ⇒ 卡片上零痕迹。
+        const linkInfo = cardEl?.props?.linkInfo ?? linkInfoMapRef.current.get(goalId);
+        const linkBadge = renderLinkBadge(linkInfo, linkTitleOf);
+        return h("div", { key: cardEl.key ?? goalId, className: "dg-draft-wrap", style: { minWidth: 0 } }, liveDot, linkBadge, cardEl, actionRow);
       };
       // g-223: 版本管理抽屉与显隐过滤状态（本地存储持久化，按当前解析 workspace 隔离与响应）
       const [showVersionDrawer, setShowVersionDrawer] = React.useState(false);
@@ -156,11 +195,19 @@
       const [versionActionNote, setVersionActionNote] = React.useState(null);
       const [versionActionLoading, setVersionActionLoading] = React.useState(false);
       // g-127: 阻塞列默认折叠（竖向窄条汇总，点击展开）
-      const [blockedColumnCollapsed, setBlockedColumnCollapsed] = React.useState(true);
-      // g-156: 交付列默认展开（首次打开及刷新默认展开，折叠状态只在当前页面/会话生效）
-      const [deliverColumnCollapsed, setDeliverColumnCollapsed] = React.useState(false);
-      // g-162: 泳道折叠状态（active 版本泳道、独立目标泳道、backlog 泳道独立折叠，默认展开；只在当前页面生效）
-      const [collapsedLanes, setCollapsedLanes] = React.useState({});
+      // [v0.30] 记忆性：初值惰性读持久化（默认折叠 true；用户显式展开过就恢复展开）。
+      // **只在用户点击列头 / 折叠窄条时写**（两处 onClick 里的 writePersistedJson）；搜索的
+      // 自动展开（navigateToMatch）与退出搜索的自动恢复（exitSearch）**不落盘**——
+      // 它们是临时视图修正，不是用户偏好（口径：只持久化「用户显式选择」）。
+      const [blockedColumnCollapsed, setBlockedColumnCollapsed] = React.useState(() => readPersistedBool(PK_BLOCKED_COLUMN, true));
+      // g-156: 交付列默认展开（首次打开及刷新默认展开）
+      // [v0.30] 记忆性：同上（默认展开 false；用户显式折叠过就恢复折叠；只在用户点击列头时写）。
+      const [deliverColumnCollapsed, setDeliverColumnCollapsed] = React.useState(() => readPersistedBool(PK_DELIVER_COLUMN, false));
+      // g-162: 泳道折叠状态（active 版本泳道、独立目标泳道、backlog 泳道独立折叠，默认展开）
+      // [v0.30] 记忆性：整份 {laneKey: bool} 快照持久化——**只在 toggleLaneCollapse（用户点击
+      // 泳道底部的折叠三角）时写**；退出搜索恢复（exitSearch）/ 命中导航自动展开
+      //（navigateToMatch）不落盘（同 blocked/deliver 口径：只持久化用户显式选择）。
+      const [collapsedLanes, setCollapsedLanes] = React.useState(() => readPersistedBoolMap(PK_COLLAPSED_LANES));
       // g-258: 折叠区（已发布版本/backlog）按需拉取加载与错误状态
       const [sectionLoading, setSectionLoading] = React.useState({});
       const [sectionError, setSectionError] = React.useState({});
@@ -228,9 +275,22 @@
       const [boardWidth, setBoardWidth] = React.useState(Infinity);
       // g-352：窄宽度弹层（工具条折叠容器）开关
       const [showHeadOverflow, setShowHeadOverflow] = React.useState(false);
-      // g-352：单版本模式选中的版本 slug——**仅会话内 React state，不落任何持久化存储**
-      //（口径：无键名、作用域=KanbanView 实例；隐藏状态唯一持久真源仍是 hiddenVersionSlugs）。
-      const [viewVersionSlug, setViewVersionSlug] = React.useState(null);
+      // g-352：单版本模式选中的版本 slug。
+      // [v0.30] 记忆性（用户要求「所有按键都要有记忆性」）：**用户显式选择**（在「查看版本」
+      // 下拉里点过某一项）持久化到 PK_VIEW_VERSION，重启后按上次的选择恢复；初值 null 表示
+      // 「未显式选择」（仍有既有默认落点逻辑：可见版本→第一个 / 无可见版本→独立目标）。
+      // 损坏/跨工作区失效的 slug 由 pickSingleVersion 的兜底（找不到→list[0]）与
+      // standaloneLaneDefault 自然吸收，不需要额外校验。隐藏状态的唯一持久真源仍是
+      // hiddenVersionSlugs（useHiddenVersionSlugs），本键只记「用户点了哪一项」。
+      const [viewVersionSlug, setViewVersionSlugRaw] = React.useState(() => {
+        const v = readPersistedJson(PK_VIEW_VERSION, null);
+        return typeof v === "string" && v ? v : null;
+      });
+      const setViewVersionSlug = (v) => {
+        const next = v === null || v === undefined || v === "" ? null : String(v);
+        setViewVersionSlugRaw(next);
+        writePersistedJson(PK_VIEW_VERSION, next);
+      };
       // g-352：「全部版本」哨兵值（非版本 slug；不落任何持久化存储，与 viewVersionSlug 同生命周期）
       const VIEW_ALL_VERSIONS_SLUG = "__all__";
       // g-352（负责人裁决 2026-09-24，修正侦察期定策点 #4）：backlog 同样是单版本档下的一个
@@ -853,6 +913,44 @@
         return () => { alive = false; clearInterval(timer); };
       }, [activeWs]);
 
+      // ===== [v0.30] 任务连线角标 =====
+      // 背景：连线（autopilot 任务连线画布）本轮起**真正参与派发**（后端 linkGates 门禁：
+      // start/end 连接要求前置目标已交付，mid 为实时协作）。前端原先只在覆盖层画线，
+      // 卡片本身不体现「它在等谁 / 谁在等它」⇒ 这里给卡片补一枚角标。
+      //
+      // 数据源：POST /api/dsh-graph-autopilot/links {action:"list"}（与画布 LinksLayer 同一接口、
+      // 同一 workspace 口径）→ {ok, links:[{id, from, to, kind:"start"|"end"|"mid", ...}]}。
+      // 每 8 秒轮询一次（与上面 agents 轮询并列、同频），在内存里算出每个 goal 的
+      // { waiting, blocking, partners } map，渲染卡片时查表经 linkInfo prop 传入
+      //（在现有三处 Card 调用点以「新增一个 prop」的方式传入，**不新增 Card 渲染调用点**）。
+      //   waiting  = 该目标作为 to 的 start/end 连接数（在等几个前置交付）
+      //   blocking = 该目标作为 from 的 start/end 连接数（在挡几个后续）
+      //   partners = 该目标参与的 mid（实时协作）连接数（两个方向都算）
+      // 只读旁路：不参与看板数据流、不改任何既有 state；失败静默（保持上一次结果，不打扰用户）。
+      const [linkInfoMap, setLinkInfoMap] = React.useState(() => new Map());
+      React.useEffect(() => {
+        if (!activeWs) { setLinkInfoMap(new Map()); return undefined; }
+        let alive = true;
+        const poll = () => {
+          fetch("/api/dsh-graph-autopilot/links", {
+            method: "POST", credentials: "same-origin",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ workspace: activeWs, action: "list" }),
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+              if (!alive || !d?.ok) return;
+              const next = buildLinkInfoMap(Array.isArray(d.links) ? d.links : []);
+              // 内容不变时不换引用：避免每 8 秒一次无意义的整板重渲染。
+              setLinkInfoMap((prev) => (linkInfoMapEqual(prev, next) ? prev : next));
+            })
+            .catch(() => { /* 静默：保持上一次结果 */ });
+        };
+        poll();
+        const timer = setInterval(poll, 8000);
+        return () => { alive = false; clearInterval(timer); };
+      }, [activeWs]);
+
       // [v0.18] 技能 / Agent 预设目录：打开新建目标弹窗时按需拉取一次（失败静默降级为空列表）
       React.useEffect(() => {
         if (!showCreateGoal || !activeWs) return;
@@ -1251,6 +1349,19 @@
         ...b.standalone,
         ...b.backlog,
       ];
+      // [v0.30] 连线角标：**每次渲染刷新两个 ref**（withDraftAction 定义在文件顶部、
+      // 声明顺序上无法直接闭包这两个变量，故用 ref 做单次渲染内的只读快照）：
+      //   ① linkInfoMapRef ← 上面 8s 轮询得到的 linkInfoMap（goalId → {waiting,blocking,partners}）
+      //   ② linkTitleByIdRef ← 全部可见 lane 的 goalId → title（角标 title 里要写清「在等谁」；
+      //      查不到就退回 id 本身，见 renderLinkBadge 的 label()）
+      // 口径刻意用 allGoals（当前视图内可见目标）而非全量：角标只服务「看得见的卡片」，
+      // 对端若是未渲染的隐藏版本目标，title 里就显示它的 id（信息不丢、也不额外拉数据）。
+      linkInfoMapRef.current = linkInfoMap;
+      const linkTitleById = new Map();
+      for (const g of allGoals) {
+        if (g && typeof g.id === "string" && g.id && typeof g.title === "string" && g.title) linkTitleById.set(g.id, g.title);
+      }
+      linkTitleByIdRef.current = linkTitleById;
 
       // ===== g-273：确认列「批量接受」 =====
       // 当前视图内 status=review 的目标（候选集）。allGoals 已按当前视图过滤：
@@ -1314,7 +1425,13 @@
       // g-233 P4: 用户显式操作泳道折叠状态，从临时恢复列表中移除（用户意图优先）
       const toggleLaneCollapse = (key, collapse) => {
         tempExpandedRef.current.expandedLanes = toggleLaneCollapseInState(tempExpandedRef.current.expandedLanes, key);
-        setCollapsedLanes((prev) => ({ ...prev, [key]: collapse }));
+        setCollapsedLanes((prev) => {
+          const next = { ...prev, [key]: collapse };
+          // [v0.30] 记忆性：**这是用户显式折叠/展开泳道的唯一入口**（泳道底部折叠三角），
+          // 故在此落盘；搜索结果自动展开/退出搜索自动恢复不走这里（它们是临时视图修正）。
+          writePersistedJson(PK_COLLAPSED_LANES, next);
+          return next;
+        });
         // g-258: 展开 backlog 时按需拉取具体数据
         if (key === "backlog" && !collapse) {
           const bd = state?.data;
@@ -1696,7 +1813,9 @@
               onClick: (e) => {
                 e.stopPropagation();
                 tempExpandedRef.current.blockedExpanded = false;
+                // [v0.30] 记忆性：点折叠窄条 = 用户显式展开，落盘。
                 setBlockedColumnCollapsed(false);
+                writePersistedJson(PK_BLOCKED_COLUMN, false);
               },
               title: dgT('blocked.collapsedTitle', { count: orderedGoals.length }),
               // g-127：折叠态仍支持拖放（拖入阻塞列）
@@ -1745,7 +1864,9 @@
               onClick: (e) => {
                 e.stopPropagation();
                 tempExpandedRef.current.deliverExpanded = false;
+                // [v0.30] 记忆性：点折叠窄条 = 用户显式展开，落盘。
                 setDeliverColumnCollapsed(false);
+                writePersistedJson(PK_DELIVER_COLUMN, false);
               },
               title: dgT('deliver.collapsedTitle', { count }),
               onDragOver: (e) => {
@@ -1814,6 +1935,8 @@
                 _isSearchCurrent: currentMatchedGoalId === g.id,
                 _snippet: mInfo?.snippet ?? "",
                 liveChild: liveChildGoals.has(g.id), // [v0.29] 问题 7：有子进程在跑（绿点）
+                // [v0.30] 连线角标数据（undefined / 全 0 ⇒ 不渲染角标；渲染在 withDraftAction 的包裹层）
+                linkInfo: linkInfoMap.get(g.id),
               }, setModalGoal, (goalId, cardId) => setDrawerCard({ goalId, cardId }),
                 modalGoal === g.id, drawerCard?.cardId, goalStatus,
                 expanded,
@@ -2095,6 +2218,8 @@
                 _isSearchCurrent: currentMatchedGoalId === g.id,
                 _snippet: mInfo?.snippet ?? "",
                 liveChild: liveChildGoals.has(g.id), // [v0.29] 问题 7：有子进程在跑（绿点）
+                // [v0.30] 连线角标数据（undefined / 全 0 ⇒ 不渲染角标）
+                linkInfo: linkInfoMap.get(g.id),
               }, setModalGoal, (goalId, cardId) => setDrawerCard({ goalId, cardId }),
                 modalGoal === g.id, drawerCard?.cardId, goalStatus,
                 expanded,
@@ -2230,6 +2355,8 @@
             _isSearchCurrent: currentMatchedGoalId === g.id,
             _snippet: mInfo?.snippet ?? "",
             liveChild: liveChildGoals.has(g.id), // [v0.29] 问题 7：有子进程在跑（绿点）
+            // [v0.30] 连线角标数据（undefined / 全 0 ⇒ 不渲染角标）
+            linkInfo: linkInfoMap.get(g.id),
           }, setModalGoal, (goalId, cardId) => setDrawerCard({ goalId, cardId }),
             modalGoal === g.id, drawerCard?.cardId, goalStatus,
             expanded,
@@ -3013,7 +3140,12 @@
                 },
                 onClick: () => {
                   tempExpandedRef.current.blockedExpanded = false;
-                  setBlockedColumnCollapsed((p) => !p);
+                  // [v0.30] 记忆性：列头点击 = 用户显式选择（唯一入口），落盘。
+                  setBlockedColumnCollapsed((p) => {
+                    const next = !p;
+                    writePersistedJson(PK_BLOCKED_COLUMN, next);
+                    return next;
+                  });
                 },
                 title: blockedColumnCollapsed ? dgT("blocked.collapsedTitle", { count: 0 }) : dgT("blocked.collapsedTitle", { count: 0 }),
               }, blockedColumnCollapsed
@@ -3029,7 +3161,12 @@
                 },
                 onClick: () => {
                   tempExpandedRef.current.deliverExpanded = false;
-                  setDeliverColumnCollapsed((p) => !p);
+                  // [v0.30] 记忆性：列头点击 = 用户显式选择（唯一入口），落盘。
+                  setDeliverColumnCollapsed((p) => {
+                    const next = !p;
+                    writePersistedJson(PK_DELIVER_COLUMN, next);
+                    return next;
+                  });
                 },
                 title: deliverColumnCollapsed ? dgT("deliver.collapsedTitle", { count: 0 }) : dgT("deliver.collapsedTitle", { count: 0 }),
               }, deliverColumnCollapsed
@@ -3791,6 +3928,179 @@
         // [v0.22] 任务连线画布（fixed 覆盖层：连线/橡皮擦 + 三种连接类型）
         h(LinksLayer, { key: "links-layer", workspace: activeWs }),
       );
+    }
+
+    // ==========================================================================
+    // [v0.30] 记忆性：用户显式选择的持久化（localStorage；键前缀统一 `dsh-graph.`，
+    // 与既有 `dsh-graph.refresh-interval` / `dsh-graph.hidden-versions.*` 同风格——
+    // 不新增第二套存储风格）。
+    //
+    // 边界纪律（只做这两件事，多一件都不做）：
+    //   ① **只持久化「用户显式选择」**：用户在界面上亲自点过/勾过/选过的偏好
+    //     （已归档显示开关、类型筛选、标签筛选、阻塞/交付列折叠、泳道折叠、单泳道档的
+    //     「查看版本」显式选择）——重启/刷新后按上次的选择恢复。
+    //   ② **绝不持久化运行时数据**：loading / error / boardData（含 retainedData/etag）/
+    //     modalGoal / drawerCard / expandedGoals / openReleased / versionDetail* /
+    //     sectionLoading / sectionError / searchMatches / drag / orderMap / updateEmphasis /
+    //     liveChildGoals / linkInfoMap 一律只活在本次会话内存里——它们是「数据」不是
+    //     「偏好」，持久化只会把过期数据盖上重启后的新看板（幽灵卡片 / 口径漂移）。
+    //
+    // 声明位置：与 search-state / narrow-width / board-retain 同处**工厂作用域**
+    //（KanbanView 之外）——KanbanView 内部每次渲染引用同一份定义，不产生新函数身份。
+    //
+    // 容错：localStorage 不可用（隐私模式 / 配额满 / SSR / 未定义）或存量值损坏
+    //（非 JSON / 类型不符 / 被手改）时一律**回落调用方给的默认值**；只读旁路，
+    // 绝不抛出、绝不阻断渲染（单测覆盖「getItem 抛异常不崩」）。
+    // ==========================================================================
+    const PERSIST_PREFIX = "dsh-graph.";
+    // [v0.30] 记忆性键名集中一处（实际存储键 = PERSIST_PREFIX + 下表值；改键名只改这里）。
+    const PK_SHOW_ARCHIVED = "show-archived";              // 已归档显示开关
+    const PK_TYPE_FILTER = "type-filter";                  // 类型筛选（字符串数组）
+    const PK_TAG_FILTER = "tag-filter";                    // 标签筛选（字符串数组）
+    const PK_BLOCKED_COLUMN = "blocked-column-collapsed";  // 阻塞列折叠
+    const PK_DELIVER_COLUMN = "deliver-column-collapsed";  // 交付列折叠
+    const PK_COLLAPSED_LANES = "collapsed-lanes";          // 泳道折叠（{laneKey: bool}）
+    const PK_VIEW_VERSION = "view-version";                // 单泳道档「查看版本」显式选择（哨兵值原样存）
+
+    /** [v0.30] 读并解析持久化 JSON；缺失 / 损坏 / 不可用一律回落 dflt，绝不抛。 */
+    function readPersistedJson(key, dflt) {
+      try {
+        const raw = localStorage.getItem(PERSIST_PREFIX + key);
+        if (raw === null || raw === "") return dflt;
+        const parsed = JSON.parse(raw);
+        return parsed === null || parsed === undefined ? dflt : parsed;
+      } catch { return dflt; }
+    }
+    /** [v0.30] 写持久化 JSON；不可用 / 配额满 / 不可序列化静默忽略（记忆性降级为会话内有效），绝不抛。 */
+    function writePersistedJson(key, v) {
+      try { localStorage.setItem(PERSIST_PREFIX + key, JSON.stringify(v)); } catch { /* 忽略 */ }
+    }
+    /** [v0.30] 读布尔偏好；类型不符（被手改成字符串 / 数字等）按 dflt。 */
+    function readPersistedBool(key, dflt) {
+      const v = readPersistedJson(key, dflt);
+      return typeof v === "boolean" ? v : dflt;
+    }
+    /** [v0.30] 读字符串数组偏好（元素转字符串、去空、去重）；损坏时回落 []。 */
+    function readPersistedStrArray(key) {
+      const v = readPersistedJson(key, null);
+      if (!Array.isArray(v)) return [];
+      const out = [];
+      for (const item of v) {
+        if (item === null || item === undefined) continue;
+        const s = String(item);
+        if (s && !out.includes(s)) out.push(s);
+      }
+      return out;
+    }
+    /** [v0.30] 读 Record<string, boolean> 偏好（只保留真布尔值项）；损坏时回落 {}。 */
+    function readPersistedBoolMap(key) {
+      const v = readPersistedJson(key, null);
+      if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+      const out = {};
+      for (const [k, val] of Object.entries(v)) {
+        if (typeof k === "string" && k && typeof val === "boolean") out[k] = val;
+      }
+      return out;
+    }
+
+    // ==========================================================================
+    // [v0.30] 连线角标：从 links 列表派生「每个目标在等谁 / 挡谁 / 与谁协作」的纯函数。
+    //
+    // 口径（与后端 linkGates 一致）：
+    //   start / end = 有向依赖连接（参与派发门禁：to 端要等 from 端交付）
+    //     · waiting  = 该目标作为 to 的 start/end 条数（它在等几个前置交付）
+    //     · blocking = 该目标作为 from 的 start/end 条数（它在挡几个后续）
+    //   mid = 实时协作（双向，无门禁语义）⇒ partners 两个方向都计（去重：同一对目标多条 mid 只计一次）
+    // 返回 Map<goalId, {waiting, blocking, partners, waitingIds, blockingIds, partnerIds}>；
+    // 只登记「有连接」的目标（全 0 的目标不进 map ⇒ 渲染侧自然不画角标）。
+    // 纯函数：不读全局、不写状态（便于单测与复用）。
+    // ==========================================================================
+    function buildLinkInfoMap(links) {
+      const map = new Map();
+      const ensure = (id) => {
+        let rec = map.get(id);
+        if (!rec) {
+          rec = { waiting: 0, blocking: 0, partners: 0, waitingIds: [], blockingIds: [], partnerIds: [] };
+          map.set(id, rec);
+        }
+        return rec;
+      };
+      const seenMidPairs = new Set();
+      for (const l of Array.isArray(links) ? links : []) {
+        if (!l || typeof l !== "object") continue;
+        const from = typeof l.from === "string" ? l.from : "";
+        const to = typeof l.to === "string" ? l.to : "";
+        if (!from || !to) continue;
+        const kind = l.kind === "start" || l.kind === "end" ? l.kind : "mid";
+        if (kind === "mid") {
+          // 同一对目标的重复 mid 只计一次伙伴（避免「连了两次显示 2」的假计数）
+          const pairKey = from < to ? from + "\u0000" + to : to + "\u0000" + from;
+          if (seenMidPairs.has(pairKey)) continue;
+          seenMidPairs.add(pairKey);
+          ensure(from).partners += 1;
+          ensure(from).partnerIds.push(to);
+          ensure(to).partners += 1;
+          ensure(to).partnerIds.push(from);
+          continue;
+        }
+        ensure(to).waiting += 1;
+        ensure(to).waitingIds.push(from);
+        ensure(from).blocking += 1;
+        ensure(from).blockingIds.push(to);
+      }
+      return map;
+    }
+    /** [v0.30] 两份 linkInfoMap 是否内容等价（避免每 8 秒无意义换引用 ⇒ 整板重渲染）。 */
+    function linkInfoMapEqual(a, b) {
+      if (a === b) return true;
+      if (!a || !b || a.size !== b.size) return false;
+      for (const [id, ra] of a) {
+        const rb = b.get(id);
+        if (!rb) return false;
+        if (ra.waiting !== rb.waiting || ra.blocking !== rb.blocking || ra.partners !== rb.partners) return false;
+        // 角标 title 里要列出对端 id：id 列表也要比，否则「换了一个前置」不会刷新文案
+        if (ra.waitingIds.join(",") !== rb.waitingIds.join(",")) return false;
+        if (ra.blockingIds.join(",") !== rb.blockingIds.join(",")) return false;
+        if (ra.partnerIds.join(",") !== rb.partnerIds.join(",")) return false;
+      }
+      return true;
+    }
+    /** [v0.30] 角标是否应当渲染（undefined / 全 0 ⇒ 不渲染任何东西）。 */
+    function hasLinkInfo(info) {
+      return !!info && ((info.waiting ?? 0) > 0 || (info.blocking ?? 0) > 0 || (info.partners ?? 0) > 0);
+    }
+    /**
+     * [v0.30] 生成卡片连线角标元素（无信息时返回 null ⇒ 卡片上不出现任何痕迹）。
+     * 位置：卡片**左上角**（右上角已被 .dg-live-dot 绿点占用，见 DRAFT_ACTION_CSS ⇒ 不重叠）。
+     * @param {{waiting:number, blocking:number, partners:number, waitingIds?:string[], blockingIds?:string[], partnerIds?:string[]}|undefined} info
+     * @param {(id:string)=>string} [titleOf] id → 标题（查不到时退回 id 本身）
+     */
+    function renderLinkBadge(info, titleOf) {
+      if (!hasLinkInfo(info)) return null;
+      const label = (id) => { const t = titleOf?.(id); return t ? t + "（" + id + "）" : id; };
+      // 显示口径：等前置优先（门禁语义最强）→ 挡后续 → 协作伙伴；
+      // 只显示一个数字（卡片角落空间有限），title 里给全量中文说明。
+      let glyph = "⛓";
+      let count = info.waiting ?? 0;
+      if (!count) { glyph = "⤴"; count = info.blocking ?? 0; }
+      if (!count) { glyph = "⇄"; count = info.partners ?? 0; }
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案（title 中文说明）按要求直接使用中文。
+      const parts = [];
+      if ((info.waiting ?? 0) > 0) parts.push("等待 " + info.waiting + " 个前置任务交付：" + (info.waitingIds ?? []).map(label).join("、"));
+      if ((info.blocking ?? 0) > 0) parts.push("阻挡 " + info.blocking + " 个后续任务：" + (info.blockingIds ?? []).map(label).join("、"));
+      if ((info.partners ?? 0) > 0) parts.push("与 " + info.partners + " 个任务实时协作：" + (info.partnerIds ?? []).map(label).join("、"));
+      return h("span", {
+        className: "dg-link-badge",
+        "aria-hidden": "true",
+        title: parts.join("；") + "（连线参与派发门禁；见「任务连线画布」）",
+        style: {
+          position: "absolute", top: 3, left: 4, zIndex: 4, pointerEvents: "none",
+          fontSize: 10, lineHeight: "12px", padding: "0 4px", borderRadius: 6,
+          background: "#2b2f3a", color: "#e6e6e6",
+          border: "1px solid rgba(140,145,155,.55)",
+          whiteSpace: "nowrap",
+        },
+      }, glyph + " " + count);
     }
 
     // [v0.28] 问题 19：任务执行板（🛰）—— 看板头部下方的可折叠子代理看板（工厂作用域组件，
