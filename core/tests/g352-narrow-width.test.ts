@@ -270,7 +270,20 @@ test("g-352 判据3：单版本模式下只渲染选中版本一个泳道，阶�
   assert.match(src, /const singleColumnMode = !!\(singleLaneMode \|\| searchLaneActive\);/);
   // 其他泳道（其余 active 版本、standalone、backlog、released）在该档一律不渲染
   // （断言强度不变：逐字钉住表达式；闸门由 singleLaneMode 扩为 singleColumnMode ⇒ 搜索档同样成立）
-  assert.match(src, /for \(const v of \(singleColumnMode \? \[\] : active\)\)/);
+  // [v0.34] 问题 8（前半）：常规版本泳道的渲染批次改为 `groupLaneVersions.concat(normalLaneVersions)`
+  //（常驻分组在前、普通版本在后；两批由 isDefaultGroup 切分），闸门表达式 `singleColumnMode ? [] : …`
+  // 仍是逐字钉住 —— **判别力不降反升**：旧断言只有 1 条（闸门存在），新断言共 4 条：
+  //  ① 单列档下该批次**仍必须为空**（常规泳道不渲染）；② 非单列档下批次来源**恰好**是这两批的拼接；
+  //  ③ 两批分别由 isDefaultGroup(slug) 的正/负向过滤切分（复用工厂作用域既有判据、无第二套名单）；
+  //  ④ for 循环消费的正是该批次（不存在绕过批次的第二处 active 遍历）。
+  assert.match(src, /const groupLaneVersions = active\.filter\(\(v\) => isDefaultGroup\(v\.slug\)\);/);
+  assert.match(src, /const normalLaneVersions = active\.filter\(\(v\) => !isDefaultGroup\(v\.slug\)\);/);
+  assert.match(src, /const laneOrderedActive = singleColumnMode \? \[\] : groupLaneVersions\.concat\(normalLaneVersions\);/);
+  // ④ 泳道遍历**唯一**且消费的正是该批次；旧式「直接遍历 active」的写法已不存在
+  //（注意：全文件仍有另一处 `for (const v of active)` 用于「目标归属哪个版本」的查找，
+  //  那不是泳道渲染循环 —— 故这里钉住的是 laneOrderedActive 的遍历唯一性 + 旧写法彻底消失）。
+  assert.equal([...src.matchAll(/for \(const v of laneOrderedActive\)/g)].length, 1, "泳道遍历唯一（不新增第二处常规泳道循环）");
+  assert.doesNotMatch(src, /for \(const v of \(singleColumnMode \? \[\] : active\)\)/, "旧式「直接按载荷顺序遍历 active 渲染泳道」的写法已不存在");
   assert.match(src, /const releasedRows = \(singleColumnMode \? \[\] : released\)\.map/);
   assert.match(src, /if \(!singleColumnMode\) \{\n\s*rows\.push\(\.\.\.lane\(dgT\("lane\.standalone"\)/);
   // 列模板退化为单列全宽（阶段纵向堆叠而非横向挤压）

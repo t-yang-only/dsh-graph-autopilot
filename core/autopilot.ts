@@ -18,6 +18,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { appendEvent, readEvents, type GraphEvent } from "./events.ts";
 import { createGoal, findGoalFile, listGoalFiles, loadGoal, saveGoal, setCriteria, moveGoal, unarchiveGoal, normalizeGoalType, readGoalBinding, GraphError } from "./ops.ts";
+// [v0.34] 问题 8：回收站条目的 version.md 与 version-lane.ts 同构（同一 parseDoc/serializeDoc 事实来源）。
+import { serializeDoc } from "./model.ts";
 
 export const AUTOPILOT_STATE_FILE = "autopilot.json";
 export const RECOMMENDATIONS_FILE = "autopilot-recommendations.json";
@@ -56,6 +58,15 @@ export interface AutopilotState {
    *  自动采纳（推荐非空且无 runner 在跑时采纳第 1 条到「建议泳道」，10 分钟冷却）。
    *  两个模式都**永不自动停止**：只有开关被关掉才不再推进/不再采纳（不杀在跑的 runner）。 */
   steward?: { enabled: boolean; lastScanAt?: string | null; lastAdoptAt?: string | null };
+  /** [v0.34] 问题 4：上次「泳道无可派发目标但仍有未交付目标」时主动唤起管理子代理的时间（ISO），
+   *  10 分钟冷却，避免反复拉起同一个分析。 */
+  advanceNudgedAt?: string | null;
+  /** [v0.34] 问题 6：上次因「链路瓶颈」（gatekeeper 自身未 blocked 却挡住下游）唤起管理子代理的时间（ISO），
+   *  10 分钟冷却（与 advanceNudgedAt 各自独立计时）。 */
+  gatekeeperNudgedAt?: string | null;
+  /** [v0.34] 问题 4：上次判定「本工作区除草稿外全部交付」的时间（ISO）。
+   *  幂等标记：同一交付状态只写一次 autopilot.advance_completed；又出现未交付目标时清空。 */
+  advanceCompletedAt?: string | null;
 }
 
 const DEFAULT_STATE: AutopilotState = {
@@ -71,6 +82,9 @@ const DEFAULT_STATE: AutopilotState = {
   lanePrompts: {},
   advanceMode: false,
   steward: { enabled: false, lastScanAt: null, lastAdoptAt: null },
+  advanceNudgedAt: null,
+  gatekeeperNudgedAt: null,
+  advanceCompletedAt: null,
 };
 
 export function readAutopilotState(root: string): AutopilotState {
@@ -421,8 +435,13 @@ export function laneReadiness(root: string, version: string, opts?: {
   /** [v0.30] 本泳道因连线门禁而等待的目标与它在等谁（advisory，与 goals[].link_blocked 同源）。 */
   link_blocked: { goal: string; waiting_for: string[] }[];
 } {
-  const gdir = join(root, "versions", version, "goals");
-  if (!existsSync(gdir)) throw new GraphError(`版本 ${version} 不存在或没有 goals 目录`);
+  // [v0.34] 问题 4：独立目标泳道（version="standalone"，数据在 root/goals/）与版本泳道走同一套
+  // 逐目标判定——推进模式要对「所有有未完结目标的泳道」给结论，standalone 不能再是盲区。
+  const isStandalone = String(version ?? "").trim() === "standalone";
+  const gdir = isStandalone ? join(root, "goals") : join(root, "versions", version, "goals");
+  if (!existsSync(gdir)) {
+    throw new GraphError(isStandalone ? "独立目标目录不存在或没有 goals 目录" : `版本 ${version} 不存在或没有 goals 目录`);
+  }
   const events = readEvents(root);
   // [v0.30] 连线门禁判定表：每泳道只扫一次连线表与交付表
   const links = listLinks(root);
@@ -430,50 +449,75 @@ export function laneReadiness(root: string, version: string, opts?: {
   const goals: LaneGoalReadiness[] = [];
   const linkBlocked: { goal: string; waiting_for: string[] }[] = [];
   for (const id of readdirSync(gdir).sort()) {
+    if (id === "archived") continue; // 独立目标泳道的归档区（goals/archived/）不是目标条目
     const file = join(gdir, id, "goal.md");
     if (!existsSync(file)) continue;
-    const doc = loadGoal(file);
-    if (doc.meta.archived) continue;
-    const blockers: string[] = [];
-    if (doc.meta.status === "in_progress") {
-      // [v0.27] 问题 9：attempt 子代理已死（如 DSH 重启后 live registry 无此 child）时不阻断派发，
-      // 让自动恢复能重新执行该目标；拿不到 child id（无绑定/绑定已清）时保守沿用旧阻断。
-      let childGone = false;
-      if (opts?.isLive) {
-        try {
-          const binding = readGoalBinding(root, id);
-          if (binding?.child_id) childGone = opts.isLive(binding.child_id) === false;
-        } catch { /* 绑定读取失败：保守按仍在执行处理 */ }
-      }
-      if (!childGone) blockers.push("已在执行中（等待当前 attempt 收尾）");
-    }
-    if (doc.meta.status === "blocked") blockers.push(`目标阻塞：${doc.meta.blocked_reason || "未提供原因"}`);
-    if (doc.meta.status === "delivered") blockers.push("已交付");
-    if (doc.meta.status === "draft") blockers.push("仍是草稿（backlog 目标不可派发）");
-    const desc = sectionText(doc.body, "目标描述");
-    if (!desc || desc.startsWith("（待登记")) blockers.push("目标描述为空或占位符——先补写描述再派发");
-    const confirmed = events.some((e) => e.goal === id && e.event === "criteria.confirmed");
-    if (!confirmed) blockers.push("质量判据未确认（criteria.confirmed 缺失）");
-    // [v0.30] 连线门禁（advisory，不并入 ready）
-    let link_blocked = false;
-    let waiting_for: string[] = [];
-    if (lookup) {
-      try {
-        const rep = linkGateReport(root, id, { lookup, links });
-        if (rep.blocked) {
-          link_blocked = true;
-          waiting_for = [...new Set(rep.unsatisfied.map((c) => c.from))];
-          linkBlocked.push({ goal: id, waiting_for });
-        }
-      } catch { /* 门禁判定失败不阻断就绪判定 */ }
-    }
-    goals.push({
-      id, title: doc.meta.title ?? id, status: String(doc.meta.status ?? ""),
-      ready: blockers.length === 0, blockers,
-      ...(link_blocked ? { link_blocked, waiting_for } : {}),
-    });
+    const row = evaluateGoalReadiness(id, file, { root, events, lookup, links, isLive: opts?.isLive });
+    if (!row) continue;
+    goals.push(row);
+    if (row.link_blocked) linkBlocked.push({ goal: id, waiting_for: row.waiting_for ?? [] });
   }
   return { version, goals, runnable: goals.filter((g) => g.ready).map((g) => g.id), link_blocked: linkBlocked };
+}
+
+/** [v0.34] 问题 4：派发前「已在执行中」阻断文案（唯一事实来源——scanStuckLanes 靠同一常量识别
+ *  「正在执行、不算卡住」的泳道，两处绝不会因措辞漂移而失配）。 */
+const BLOCKER_IN_PROGRESS = "已在执行中（等待当前 attempt 收尾）";
+
+/**
+ * [v0.34] 问题 4：单个目标的就绪判定（laneReadiness 的逐目标内核，抽出来给 standalone 泳道复用，
+ * 保证「版本泳道」与「独立目标泳道」口径一致）。归档目标返回 null（不计入泳道）。
+ */
+function evaluateGoalReadiness(
+  id: string,
+  file: string,
+  ctx: {
+    root: string;
+    events: GraphEvent[];
+    lookup: DeliveryLookup | null;
+    links: GoalLink[];
+    isLive?: (childId: string) => boolean;
+  },
+): LaneGoalReadiness | null {
+  const doc = loadGoal(file);
+  if (doc.meta.archived) return null;
+  const blockers: string[] = [];
+  if (doc.meta.status === "in_progress") {
+    // [v0.27] 问题 9：attempt 子代理已死（如 DSH 重启后 live registry 无此 child）时不阻断派发，
+    // 让自动恢复能重新执行该目标；拿不到 child id（无绑定/绑定已清）时保守沿用旧阻断。
+    let childGone = false;
+    if (ctx.isLive) {
+      try {
+        const binding = readGoalBinding(ctx.root, id);
+        if (binding?.child_id) childGone = ctx.isLive(binding.child_id) === false;
+      } catch { /* 绑定读取失败：保守按仍在执行处理 */ }
+    }
+    if (!childGone) blockers.push(BLOCKER_IN_PROGRESS);
+  }
+  if (doc.meta.status === "blocked") blockers.push(`目标阻塞：${doc.meta.blocked_reason || "未提供原因"}`);
+  if (doc.meta.status === "delivered") blockers.push("已交付");
+  if (doc.meta.status === "draft") blockers.push("仍是草稿（backlog 目标不可派发）");
+  const desc = sectionText(doc.body, "目标描述");
+  if (!desc || desc.startsWith("（待登记")) blockers.push("目标描述为空或占位符——先补写描述再派发");
+  const confirmed = ctx.events.some((e) => e.goal === id && e.event === "criteria.confirmed");
+  if (!confirmed) blockers.push("质量判据未确认（criteria.confirmed 缺失）");
+  // [v0.30] 连线门禁（advisory，不并入 ready）
+  let link_blocked = false;
+  let waiting_for: string[] = [];
+  if (ctx.lookup) {
+    try {
+      const rep = linkGateReport(ctx.root, id, { lookup: ctx.lookup, links: ctx.links });
+      if (rep.blocked) {
+        link_blocked = true;
+        waiting_for = [...new Set(rep.unsatisfied.map((c) => c.from))];
+      }
+    } catch { /* 门禁判定失败不阻断就绪判定 */ }
+  }
+  return {
+    id, title: doc.meta.title ?? id, status: String(doc.meta.status ?? ""),
+    ready: blockers.length === 0, blockers,
+    ...(link_blocked ? { link_blocked, waiting_for } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +622,11 @@ export function listArchived(root: string): { id: string; title: string; from: s
 // 模板行（可复用的目标蓝图：拖到泳道 → 按模板建目标；模板本身长期留存）
 // ---------------------------------------------------------------------------
 export const TEMPLATES_FILE = "templates.json";
+/** [v0.34] 问题 7：全局模板文件（跨工作区共享），与自建分组同用 <home>/.dsh/ 一级目录。 */
+export const GLOBAL_TEMPLATES_FILE = "templates.json";
+
+/** [v0.34] 问题 7：模板作用域。缺省/未知一律视为 workspace（向后兼容旧数据——旧模板没有 scope 字段）。 */
+export type TemplateScope = "workspace" | "global";
 
 export interface GoalTemplate {
   id: string;
@@ -587,6 +636,13 @@ export interface GoalTemplate {
   criteria: string[];
   created_at: string;
   updated_at: string;
+  /** [v0.34] 问题 7：workspace（本工作区 templates.json）/ global（<home>/.dsh/templates.json）。 */
+  scope: TemplateScope;
+}
+
+/** [v0.34] 规范化模板作用域：只有显式 "global" 才是全局，其余（含缺省）一律 workspace。 */
+function normalizeTemplateScope(raw: unknown): TemplateScope {
+  return String(raw ?? "").trim().toLowerCase() === "global" ? "global" : "workspace";
 }
 
 function templateIdFor(title: string): string {
@@ -614,6 +670,9 @@ function readTemplatesFile(root: string): GoalTemplate[] {
         criteria: Array.isArray(t.criteria) ? t.criteria.map((c: any) => String(c)).filter((c: string) => c.trim()) : [],
         created_at: String(t.created_at ?? ""),
         updated_at: String(t.updated_at ?? t.created_at ?? ""),
+        // [v0.34] 问题 7：本工作区文件的条目一律按 workspace 解读（scope 字段只在全局文件里有意义，
+        // 防止手工编辑本工作区文件把条目伪装成全局模板）。
+        scope: "workspace" as TemplateScope,
       }));
   } catch {
     return [];
@@ -625,18 +684,62 @@ function writeTemplatesFile(root: string, list: GoalTemplate[]): void {
   writeFileSync(join(root, TEMPLATES_FILE), JSON.stringify(list, null, 2) + "\n", "utf8");
 }
 
+/** [v0.34] 问题 7：全局模板文件路径（<home>/.dsh/templates.json）；home 解析不到时返回 null。 */
+export function globalTemplatesFile(homeDir?: string | null): string | null {
+  const home = resolveUserHome(homeDir);
+  return home ? join(home, ".dsh", GLOBAL_TEMPLATES_FILE) : null;
+}
+
+/** [v0.34] 问题 7：读全局模板（跨工作区共享；home 解析不到时为空表）。 */
+export function readGlobalTemplates(homeDir?: string | null): GoalTemplate[] {
+  const f = globalTemplatesFile(homeDir);
+  if (!f || !existsSync(f)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(f, "utf8"));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((t: any) => t && typeof t.title === "string" && t.title.trim())
+      .map((t: any) => ({
+        id: String(t.id ?? templateIdFor(String(t.title))),
+        title: String(t.title),
+        type: normalizeGoalType(t.type),
+        description: String(t.description ?? ""),
+        criteria: Array.isArray(t.criteria) ? t.criteria.map((c: any) => String(c)).filter((c: string) => c.trim()) : [],
+        created_at: String(t.created_at ?? ""),
+        updated_at: String(t.updated_at ?? t.created_at ?? ""),
+        scope: normalizeTemplateScope(t.scope ?? "global"),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function writeGlobalTemplates(list: GoalTemplate[], homeDir?: string | null): void {
+  const f = globalTemplatesFile(homeDir);
+  if (!f) throw new GraphError("无法解析用户主目录（USERPROFILE/HOME 均不可用），不能写全局模板");
+  mkdirSync(dirname(f), { recursive: true });
+  writeFileSync(f, JSON.stringify(list, null, 2) + "\n", "utf8");
+}
+
+/** [v0.34] 问题 7：合并清单 = 全局模板（在前）+ 本工作区模板（在后），每条都带 scope。
+ *  同 id 时全局优先（与 listGroups 的「先全局后本地、slug 去重」同口径）。 */
 export function listTemplates(root: string): GoalTemplate[] {
-  return readTemplatesFile(root);
+  const global = readGlobalTemplates();
+  const local = readTemplatesFile(root);
+  const seen = new Set(global.map((t) => t.id));
+  return [...global, ...local.filter((t) => !seen.has(t.id))];
 }
 
 export function saveTemplate(
   root: string,
-  input: { id?: string | null; title: string; type?: string; description?: string; criteria?: string[] },
+  input: { id?: string | null; title: string; type?: string; description?: string; criteria?: string[]; scope?: TemplateScope | string | null },
   actor: string,
 ): GoalTemplate {
   const title = String(input?.title ?? "").trim();
   if (!title) throw new GraphError("模板标题不能为空");
-  const list = readTemplatesFile(root);
+  const scope = normalizeTemplateScope(input?.scope);
+  // [v0.34] 问题 7：写入落在哪份文件由 scope 决定（global → <home>/.dsh/templates.json）。
+  const list = scope === "global" ? readGlobalTemplates() : readTemplatesFile(root);
   const now = new Date().toISOString();
   const fields = {
     title,
@@ -646,19 +749,21 @@ export function saveTemplate(
   };
   const existing = input.id ? list.find((t) => t.id === input.id) : null;
   if (existing) {
-    Object.assign(existing, fields, { updated_at: now });
-    writeTemplatesFile(root, list);
-    appendEvent(root, { actor, event: "autopilot.template_saved", details: { id: existing.id, mode: "update" } });
+    Object.assign(existing, fields, { updated_at: now, scope });
+    if (scope === "global") writeGlobalTemplates(list);
+    else writeTemplatesFile(root, list);
+    appendEvent(root, { actor, event: "autopilot.template_saved", details: { id: existing.id, mode: "update", scope } });
     return existing;
   }
   // 新建：id 去重（同题模板追加 -2 / -3 …），保证拖拽落点定位稳定
   let id = templateIdFor(title);
   let n = 1;
   while (list.some((t) => t.id === id)) id = templateIdFor(title) + "-" + ++n;
-  const tpl: GoalTemplate = { id, ...fields, created_at: now, updated_at: now };
+  const tpl: GoalTemplate = { id, ...fields, created_at: now, updated_at: now, scope };
   list.push(tpl);
-  writeTemplatesFile(root, list);
-  appendEvent(root, { actor, event: "autopilot.template_saved", details: { id, mode: "create" } });
+  if (scope === "global") writeGlobalTemplates(list);
+  else writeTemplatesFile(root, list);
+  appendEvent(root, { actor, event: "autopilot.template_saved", details: { id, mode: "create", scope } });
   return tpl;
 }
 
@@ -689,7 +794,7 @@ function stripGoalRefs(text: string, goalId: string): string {
 export function createTemplateFromGoal(
   root: string,
   goalId: string,
-  opts: { name?: string | null } = {},
+  opts: { name?: string | null; scope?: TemplateScope | string | null } = {},
   actor: string,
 ): { ok: true; template: GoalTemplate } {
   const gid = String(goalId ?? "").trim();
@@ -700,22 +805,47 @@ export function createTemplateFromGoal(
   const name = String(opts?.name ?? "").trim();
   const description = stripGoalRefs(sectionText(doc.body, "目标描述"), gid);
   const criteria = criteriaItemsOf(root, gid);
+  const scope = normalizeTemplateScope(opts?.scope);
   const template = saveTemplate(
     root,
-    { id: null, title: name || `${type}：${title}`, type, description, criteria },
+    { id: null, title: name || `${type}：${title}`, type, description, criteria, scope },
     actor,
   );
-  appendEvent(root, { actor, event: "autopilot.template_from_goal", details: { goal: gid, template: template.id } });
+  appendEvent(root, { actor, event: "autopilot.template_from_goal", details: { goal: gid, template: template.id, scope } });
   return { ok: true, template };
 }
 
-export function deleteTemplate(root: string, id: string, actor: string): { ok: true; id: string } {
-  const list = readTemplatesFile(root);
-  const next = list.filter((t) => t.id !== id);
-  if (next.length === list.length) throw new GraphError(`模板不存在：${id}`);
-  writeTemplatesFile(root, next);
-  appendEvent(root, { actor, event: "autopilot.template_deleted", details: { id } });
-  return { ok: true, id };
+export function deleteTemplate(
+  root: string,
+  id: string,
+  actor: string,
+  opts?: { scope?: TemplateScope | string | null },
+): { ok: true; id: string; scope: TemplateScope } {
+  const tid = String(id ?? "").trim();
+  if (!tid) throw new GraphError("模板 id 不能为空");
+  // [v0.34] 问题 7：优先按传入 scope 找对文件；未传或未命中时找另一个
+  // （模板可能由旧版本建在本工作区、也可能建在全局），两处都没有才报不存在。
+  // 未传 scope 时的顺序与 listTemplates 的合并优先级一致（全局在前）——用户在列表里看到的
+  // 就是全局那条，删它才符合所见即所得（同 id 撞车时不会误删本工作区的同名条目）。
+  const wanted = opts?.scope == null || String(opts.scope).trim() === "" ? null : normalizeTemplateScope(opts.scope);
+  const order: TemplateScope[] = wanted ? [wanted, wanted === "global" ? "workspace" : "global"] : ["global", "workspace"];
+  for (const scope of order) {
+    if (scope === "global") {
+      const glist = readGlobalTemplates();
+      const gnext = glist.filter((t) => t.id !== tid);
+      if (gnext.length === glist.length) continue;
+      writeGlobalTemplates(gnext);
+      appendEvent(root, { actor, event: "autopilot.template_deleted", details: { id: tid, scope } });
+      return { ok: true, id: tid, scope };
+    }
+    const list = readTemplatesFile(root);
+    const next = list.filter((t) => t.id !== tid);
+    if (next.length === list.length) continue;
+    writeTemplatesFile(root, next);
+    appendEvent(root, { actor, event: "autopilot.template_deleted", details: { id: tid, scope } });
+    return { ok: true, id: tid, scope };
+  }
+  throw new GraphError(`模板不存在：${tid}`);
 }
 
 /**
@@ -728,7 +858,8 @@ export function applyTemplate(
   id: string,
   opts: { version?: string | null; actor: string; confirmCriteria?: boolean },
 ): { created: { id: string; title: string; version: string | null }[] } {
-  const tpl = readTemplatesFile(root).find((t) => t.id === id);
+  // [v0.34] 问题 7：合并清单里找模板（全局 + 本工作区），拖拽落点对两种 scope 等价。
+  const tpl = listTemplates(root).find((t) => t.id === id);
   if (!tpl) throw new GraphError(`模板不存在：${id}`);
   const goalId = createGoal(root, {
     title: tpl.title,
@@ -899,6 +1030,112 @@ export function setGoalExtras(
 // ---------------------------------------------------------------------------
 // [v0.18] 回收站：彻底删除（不可恢复）+ 恢复并落到指定泳道
 // ---------------------------------------------------------------------------
+
+/**
+ * [v0.34] 问题 8（后半）：删除版本前的「归档搬移 / 回滚」原语。
+ *   deleteVersion 的安全语义**保持不变**（非归档目标存在时绝不删除；归档也算数据，不静默丢），
+ *   本函数只做「把归档目录整体移出，让版本变成可删」这一步，且可精确回滚。
+ *
+ *   落点形状（**必须是完整版本目录形状**，否则回收站恢复会残缺）：
+ *     <root>/_removed/<slug>-archived-<YYYYMMDDTHHMMSS>/
+ *        ├── version.md            ← 版本元数据快照（回收站靠它显示版本名；恢复后是合法版本泳道）
+ *        └── archived/<goalId>/…   ← 原 versions/<slug>/archived/ 的内容，原名不动
+ *   目录名以 `-YYYYMMDDTHHMMSS` 结尾 —— 正是 listRemovedVersions 的时间戳正则形状，
+ *   也是 restoreRemovedVersion 解析 slug 的依据（它会移回 versions/<slug>-archived/，
+ *   成为一条名字正确的版本泳道，其归档目标随后可从回收站一键恢复）。
+ *   restoreVersionArchiveFromTrash 是它的精确逆操作（删 version.md 后把 archived/ 移回原位）。
+ *   本函数只碰 archived/ 目录，不触碰任何目标状态机，也不改写任何目标文件。
+ */
+export function moveVersionArchiveToTrash(root: string, slug: string, actor: string): {
+  ok: true;
+  dir: string;
+  moved: number;
+} | { ok: false; reason: "no-archive"; dir: null; moved: 0 } {
+  const s = String(slug ?? "").trim();
+  if (!s) throw new GraphError("版本 slug 不能为空");
+  const vdir = join(root, "versions", s);
+  const archivedDir = join(vdir, "archived");
+  if (!existsSync(archivedDir)) return { ok: false, reason: "no-archive", dir: null, moved: 0 };
+  let entries: string[];
+  try { entries = readdirSync(archivedDir).filter((d) => !d.startsWith(".")); } catch { return { ok: false, reason: "no-archive", dir: null, moved: 0 }; }
+  if (entries.length === 0) return { ok: false, reason: "no-archive", dir: null, moved: 0 };
+  // 时间戳形状与回收站解析器一致：YYYYMMDDTHHMMSS（本地时区）
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  const trashRoot = join(root, TRASH_DIR);
+  mkdirSync(trashRoot, { recursive: true });
+  // 目录名以时间戳结尾（回收站正则要求）；同秒冲突追加 -2/-3，后缀后仍是合法形状。
+  let base = `${s}-archived-${stamp}`;
+  let n = 1;
+  while (existsSync(join(trashRoot, base))) base = `${s}-archived-${stamp}-${++n}`;
+  const dst = join(trashRoot, base);
+  // 版本元数据快照（在移动之前读；读不到时用 slug 兜底，绝不编造别的字段）
+  let versionMeta: Record<string, any> | null = null;
+  try { versionMeta = loadGoal(join(vdir, "version.md")).meta; } catch { /* 元数据缺失用 slug 兜底 */ }
+  try {
+    mkdirSync(dst, { recursive: true });
+    writeFileSync(
+      join(dst, "version.md"),
+      serializeDoc({
+        meta: {
+          id: String(versionMeta?.id ?? `v-trash-${stamp}`),
+          name: String(versionMeta?.name ?? s),
+          status: "planning",
+          created_at: String(versionMeta?.created_at ?? new Date().toISOString()),
+          removed_from: `versions/${s}`,
+          removed_at: stamp,
+        },
+        body: "\n## 范围\n\n（版本删除时移入回收站的历史归档目标；恢复此版本即可把归档目标取回）\n",
+      }),
+      "utf8",
+    );
+    // 归档内容原样搬进 <dst>/archived/（目标目录名与内容一字不动）
+    renameSync(archivedDir, join(dst, "archived"));
+  } catch (e) {
+    // 任何一步失败：整体回滚（绝不留下回收站认不出的半成品目录）
+    try {
+      if (existsSync(join(dst, "archived"))) renameSync(join(dst, "archived"), archivedDir);
+      rmSync(dst, { recursive: true, force: true });
+    } catch { /* 回滚失败：交由调用方按「目录残留」如实报告 */ }
+    throw new GraphError(`归档移入回收站失败：${String((e as any)?.message ?? e)}`);
+  }
+  appendEvent(root, {
+    actor,
+    event: "autopilot.version_archive_trashed",
+    details: { version: s, dir: base, goals: entries.length },
+  });
+  return { ok: true, dir: base, moved: entries.length };
+}
+
+/** [v0.34] 问题 8：moveVersionArchiveToTrash 的精确逆操作（把归档目录移回 versions/<slug>/archived/）。
+ *  目标位置已存在时**不覆盖**，抛错让调用方如实报告「无法回滚」。 */
+export function restoreVersionArchiveFromTrash(root: string, slug: string, dir: string, actor: string): { ok: true; dir: string; moved: number } {
+  const s = String(slug ?? "").trim();
+  const base = String(dir ?? "").trim();
+  if (!s || !base || base.includes("/") || base.includes("\\") || base === "." || base === "..") {
+    throw new GraphError(`非法回收站条目：${dir}`);
+  }
+  const src = join(root, TRASH_DIR, base);
+  if (!existsSync(src)) throw new GraphError(`回收站中不存在：${base}`);
+  const inner = join(src, "archived");
+  if (!existsSync(inner)) throw new GraphError(`回收站条目缺少 archived/ 内容：${base}`);
+  const dst = join(root, "versions", s, "archived");
+  if (existsSync(dst)) throw new GraphError(`回滚目标已存在，拒绝覆盖：versions/${s}/archived`);
+  mkdirSync(dirname(dst), { recursive: true });
+  renameSync(inner, dst);
+  // 回收站条目本体（version.md + 空壳目录）已无内容：整目录清掉，避免留垃圾
+  try { rmSync(src, { recursive: true, force: true }); } catch { /* 清不掉不影响回滚成功 */ }
+  let moved = 0;
+  try { moved = readdirSync(dst).filter((x) => !x.startsWith(".")).length; } catch { /* 计数失败不影响回滚成功 */ }
+  appendEvent(root, {
+    actor,
+    event: "autopilot.version_archive_restored",
+    details: { version: s, dir: base, goals: moved },
+  });
+  return { ok: true, dir: base, moved };
+}
+
 export function purgeRemovedVersion(root: string, dir: string, actor: string): { ok: true; dir: string } {
   const base = String(dir ?? "").trim();
   if (!base || base.includes("/") || base.includes("\\") || base === "." || base === "..") {
@@ -1465,6 +1702,163 @@ export function listLanesWithOpenGoals(root: string): { lane: string; open: numb
     if (n > 0) out.push({ lane: "standalone", open: n });
   }
   return out;
+}
+
+/**
+ * [v0.34] 问题 4：识别「卡住」的泳道 —— 有未完结（非 draft / 未 delivered / 未归档）目标，
+ * 但 laneReadiness 判**没有任何可派发目标**，且这些目标里**没有一个正在执行**
+ * （in_progress 且 attempt 子代理仍活着）。
+ *
+ * 为什么需要：推进模式的旧逻辑只做「确保 runner 在跑」——runner 起不来（如整条链路被
+ * 停在 review 的目标堵住）时它不会自己想办法，实测同一泳道被反复起跑 72 次、无一成功却
+ * 无人介入。本函数把「起不来 + 没人在跑」这一状态显式识别出来，交给 host 定时器唤起管理员。
+ *
+ * 注意：全泳道都在 in_progress（活）属于**正常推进中**，不是卡住——返回 stuck=false，
+ * 避免管理子代理被反复唤起去「分析」一个正在跑的目标。
+ */
+export function scanStuckLanes(root: string, opts?: {
+  isLive?: (childId: string) => boolean;
+  /** 只扫指定泳道（缺省扫全部）。泳道键：版本 slug 或 "standalone"。 */
+  lanes?: string[] | null;
+}): { lane: string; stuck: boolean; open: number; runnable: number; in_progress: number; blockers: { id: string; title: string; status: string; reasons: string[] }[]; error: string | null }[] {
+  const wanted = Array.isArray(opts?.lanes) && opts!.lanes!.length
+    ? opts!.lanes!.map((l) => String(l ?? "").trim()).filter(Boolean)
+    : null;
+  const lanes = wanted ?? listLanesWithOpenGoals(root).map((l) => l.lane);
+  const out: { lane: string; stuck: boolean; open: number; runnable: number; in_progress: number; blockers: { id: string; title: string; status: string; reasons: string[] }[]; error: string | null }[] = [];
+  for (const lane of lanes) {
+    try {
+      const plan = laneReadiness(root, lane, { isLive: opts?.isLive });
+      const runnable = plan.runnable.length;
+      // [关键语义] 有没有人在跑：
+      //  - in_progress 且 readiness 仍判「已在执行中」⇒ 保守视为有人在做（拿不到 isLive 回调、
+      //    child id 读不到、回调返回未知都落在这里）→ 不算卡住，绝不无凭据地叫人来「分析」；
+      //  - in_progress 且 readiness 判「子代理已死」⇒ 它自己就进了 runnable（可重派），也不算卡住。
+      // 两种情况之外的「无可派发 + 有未完结」才是真正卡住。
+      const runningLive = plan.goals.filter(
+        (g) => g.status === "in_progress" && g.blockers.includes(BLOCKER_IN_PROGRESS),
+      ).length;
+      // 阻断明细只列**未完结**目标（delivered 的 ready=false 是「已交付」这条 blocker 造成的，
+      // 它不算卡住，报给管理员只会是噪音）。
+      const blockers = plan.goals
+        .filter((g) => !g.ready && g.status !== "delivered")
+        .map((g) => ({ id: g.id, title: g.title, status: g.status, reasons: g.blockers.filter((r) => r !== "已交付") }));
+      // delivered 的目标在 ready=false 里（「已交付」blocker），但它不是未完结目标，
+      // 不计入卡住判定；open 只数「还没到终态」的。
+      const unfinished = plan.goals.filter((g) => g.status !== "delivered").length;
+      const stuck = unfinished > 0 && runnable === 0 && runningLive === 0;
+      out.push({ lane, stuck, open: unfinished, runnable, in_progress: runningLive, blockers, error: null });
+    } catch (e) {
+      // 泳道不存在/读取失败：如实记录，不当作卡住（避免用错误信息唤起管理员）
+      out.push({ lane, stuck: false, open: 0, runnable: 0, in_progress: 0, blockers: [], error: String((e as any)?.message ?? e).slice(0, 200) });
+    }
+  }
+  return out;
+}
+
+/**
+ * [v0.34] 问题 4：把「卡住泳道」整理成给管理子代理的行动简报（每条的 status 与阻断原因）。
+ * 只输出真实数据（来自 laneReadiness），不做推断；供 host 拼 prompt，也可单测。
+ */
+export function buildStuckLanesBrief(
+  scan: { lane: string; stuck: boolean; open: number; blockers: { id: string; title: string; status: string; reasons: string[] }[] }[],
+): string {
+  const stuck = scan.filter((s) => s.stuck);
+  if (!stuck.length) return "";
+  return stuck
+    .map((s) => [
+      `泳道 ${s.lane}（未完结 ${s.open} 个，可派发 0 个）：`,
+      ...s.blockers.map((b) => `  - ${b.id} ${b.title || "—"}｜状态 ${b.status || "未知"}｜阻断：${b.reasons.join("；") || "未记录"}`),
+    ].join("\n"))
+    .join("\n");
+}
+
+/**
+ * [v0.34] 问题 6：把链路瓶颈整理成给管理子代理的行动简报。
+ * blocked 的瓶颈**必须**由既有「阻塞自愈」处理，这里过滤掉（绝不重复唤起）。
+ */
+export function buildGatekeepersBrief(
+  gatekeepers: { goal: string; title: string; status: string; waiting: number; blocked: boolean }[],
+): string {
+  const actionable = gatekeepers.filter((g) => !g.blocked);
+  if (!actionable.length) return "";
+  return actionable
+    .map((g) => `- ${g.goal} ${g.title || "—"}｜当前状态 ${g.status || "未知"}｜挡住 ${g.waiting} 个下游任务`)
+    .join("\n");
+}
+
+/**
+ * [v0.34] 问题 4：本工作区是否已全部推进到交付 —— 不存在任何「非 draft 且未 delivered 且未归档」
+ * 的目标（独立目标 + 全部版本泳道统一口径；draft 是用户自己留的草稿，不算待交付）。
+ * 返回 unfinished 明细，供事件记录与诊断。
+ */
+export function workspaceAdvanceStatus(root: string): {
+  done: boolean;
+  total: number;
+  delivered: number;
+  unfinished: { id: string; title: string; status: string; lane: string }[];
+} {
+  let total = 0;
+  let delivered = 0;
+  const unfinished: { id: string; title: string; status: string; lane: string }[] = [];
+  const consider = (file: string, lane: string) => {
+    try {
+      const doc = loadGoal(file);
+      if (doc.meta.archived) return;
+      const status = String(doc.meta.status ?? "");
+      if (status === "draft") return; // 草稿不算推进对象
+      total++;
+      if (status === "delivered") delivered++;
+      else unfinished.push({ id: String(doc.meta.id ?? ""), title: String(doc.meta.title ?? ""), status, lane });
+    } catch { /* 半成品跳过 */ }
+  };
+  const versionsDir = join(root, "versions");
+  if (existsSync(versionsDir)) {
+    for (const v of readdirSync(versionsDir).sort()) {
+      const gd = join(versionsDir, v, "goals");
+      if (!existsSync(gd)) continue;
+      for (const id of readdirSync(gd)) {
+        const f = join(gd, id, "goal.md");
+        if (existsSync(f)) consider(f, v);
+      }
+    }
+  }
+  const sd = join(root, "goals");
+  if (existsSync(sd)) {
+    for (const id of readdirSync(sd)) {
+      if (id === "archived") continue;
+      const f = join(sd, id, "goal.md");
+      if (existsSync(f)) consider(f, "standalone");
+    }
+  }
+  return { done: unfinished.length === 0, total, delivered, unfinished };
+}
+
+/**
+ * [v0.34] 问题 6：链路瓶颈（gatekeeper）——被最多下游 start/end 连线等待的目标。
+ * 与 /state 端点的 gatekeepers 字段同一判定（host 定时器复用本函数，避免两处口径漂移）：
+ *  - 只统计「被至少一个**未交付**下游等待」的目标（等它的下游才算它的权重）；
+ *  - status/blocked 为快照，blocked=true 表示它自己就被阻塞（交给既有「阻塞自愈」，
+ *    瓶颈唤起必须跳过，绝不重复处理）。
+ */
+export function listGatekeepers(root: string, limit = 5): { goal: string; title: string; status: string; waiting: number; blocked: boolean }[] {
+  let blockedList: { goal: string; waiting_for: string[] }[] = [];
+  try { blockedList = linkBlockedGoals(root); } catch { return []; }
+  const waitCount = new Map<string, number>();
+  for (const b of blockedList) for (const w of b.waiting_for ?? []) waitCount.set(w, (waitCount.get(w) ?? 0) + 1);
+  const out: { goal: string; title: string; status: string; waiting: number; blocked: boolean }[] = [];
+  for (const [goal, waiting] of waitCount.entries()) {
+    if (waiting <= 0) continue;
+    let title = "";
+    let status = "";
+    try {
+      const m = loadGoal(findGoalFile(root, goal)).meta;
+      title = String(m.title ?? "");
+      status = String(m.status ?? "");
+    } catch { /* 目标可能已归档/已删：保留 id 与计数，标题留空 */ }
+    out.push({ goal, title, status, waiting, blocked: status === "blocked" });
+  }
+  return out.sort((a, b) => b.waiting - a.waiting).slice(0, Math.max(1, limit));
 }
 
 // ---------------------------------------------------------------------------

@@ -227,6 +227,15 @@ import {
   unstackTrash,
   // [v0.28] 目标推进 / 全局托管：列出「有未完结目标」的泳道
   listLanesWithOpenGoals,
+  // [v0.34] 问题 4/6/8：自治推进（卡住泳道识别 + 交付完成判定）、
+  // 链路瓶颈（gatekeeper，与 /state 同源）、删版本时归档目录移入回收站（可回滚）。
+  scanStuckLanes,
+  workspaceAdvanceStatus,
+  listGatekeepers,
+  buildStuckLanesBrief,
+  buildGatekeepersBrief,
+  moveVersionArchiveToTrash,
+  restoreVersionArchiveFromTrash,
 } from "./core/autopilot.js";
 import { readEvents, appendEvent } from "./core/events.js";
 import { sT } from "./lib/server-i18n.js";
@@ -1490,6 +1499,10 @@ export function apply(ctx, config) {
         try { live = childLiveState(childId); } catch { live = "unknown"; }
         let tokens = null;
         let contextSize = null;
+        // [v0.34] 输入/输出 token 分开采集（用户要在执行板看「输出 token 数」）；
+        // 只有 usage 真的分别给出 in/out 时才填，拿不到就留 null（前端显示「—」，绝不编造）。
+        let inTokens = null;
+        let outTokens = null;
         try {
           const a = agentsRegistry && typeof agentsRegistry.get === "function" ? agentsRegistry.get(childId) : null;
           const usage = a?.session?.usage ?? a?.usage ?? null;
@@ -1498,10 +1511,29 @@ export function apply(ctx, config) {
             else if (Number.isFinite(usage.total_tokens)) tokens = usage.total_tokens;
             else if (Number.isFinite(usage.inputTokens) && Number.isFinite(usage.outputTokens)) tokens = usage.inputTokens + usage.outputTokens;
             else if (Number.isFinite(usage.input_tokens) && Number.isFinite(usage.output_tokens)) tokens = usage.input_tokens + usage.output_tokens;
+            if (Number.isFinite(usage.inputTokens)) inTokens = usage.inputTokens;
+            else if (Number.isFinite(usage.input_tokens)) inTokens = usage.input_tokens;
+            else if (Number.isFinite(usage.promptTokens)) inTokens = usage.promptTokens;
+            if (Number.isFinite(usage.outputTokens)) outTokens = usage.outputTokens;
+            else if (Number.isFinite(usage.output_tokens)) outTokens = usage.output_tokens;
+            else if (Number.isFinite(usage.completionTokens)) outTokens = usage.completionTokens;
           }
           const cs = a?.session?.contextSize ?? a?.contextSize ?? null;
           if (Number.isFinite(cs)) contextSize = cs;
         } catch { /* 拿不到就置 null */ }
+        // [v0.34] 该 attempt 改动的文件：attempt 目录下的 files.json / changes.json / touches.json（若存在）。
+        // 这是「子代理正在读写哪些文件」的持久化来源；拿不到就空数组（前端显示「—」）。
+        let filesChanged = [];
+        try {
+          for (const name of ["files.json", "changes.json", "touches.json"]) {
+            const p = join(adir, att, name);
+            if (!existsSync(p)) continue;
+            const raw = JSON.parse(readFileSync(p, "utf8"));
+            const arr = Array.isArray(raw) ? raw : (Array.isArray(raw?.files) ? raw.files : []);
+            filesChanged = arr.map((x) => (typeof x === "string" ? x : String(x?.path ?? x?.file ?? ""))).filter(Boolean);
+            if (filesChanged.length) break;
+          }
+        } catch { /* 无该文件或格式不符 → 空数组 */ }
         const parentSessionId = meta?.parent_session_id ? String(meta.parent_session_id) : null;
         rows.push({
           goal,
@@ -1516,6 +1548,11 @@ export function apply(ctx, config) {
           detached: meta?.detached === true,
           started_at: meta?.started_at ? String(meta.started_at) : null,
           tokens,
+          // [v0.34] 执行板增强字段：分别的输入/输出 token 与改动文件（拿不到则为 null/[]，前端显示「—」）
+          in_tokens: inTokens,
+          out_tokens: outTokens,
+          files_changed: filesChanged,
+          files_changed_count: filesChanged.length,
           context_size: contextSize,
         });
       }
@@ -4383,8 +4420,64 @@ export function apply(ctx, config) {
           if (isProtectedVersion(slug, { root: r })) {
             return json(res, 400, { error: `「${slug.trim()}」是常驻分组（自建），与独立目标同属性，不可删除` });
           }
-          const result = deleteVersion(r, { slug: slug.trim(), actor: "human:gui" });
-          json(res, 200, { ok: true, ...result });
+          const cleanSlug = slug.trim();
+          // ═══ [v0.34] 问题 8（后半）：带 archiveToTrash 时「归档先进回收站、再删版本」 ═══
+          // 旧行为：只要版本下还有归档目标就直接拒绝（用户看到「仍有目标（含归档目标），不能删除」），
+          // 但归档本就是历史数据、回收站能恢复，因此提供一个**显式**参数：把 versions/<slug>/archived/
+          // 搬进 _removed/<slug>-archived-<ts>/（回收站「已移除版本」区，完整版本形状、可在回收站恢复），
+          // 再重试 deleteVersion。安全语义不变：非归档目标（goals/ 下有目标）存在时**绝不删除**；
+          // 搬移失败或删除失败一律**回滚**（把归档目录精确移回原位），绝不静默丢数据。
+          const archiveToTrash = body.archiveToTrash === true || body.archive_to_trash === true;
+          if (!archiveToTrash) {
+            const result = deleteVersion(r, { slug: cleanSlug, actor: "human:gui" });
+            return json(res, 200, { ok: true, ...result });
+          }
+          let moved = null;
+          try {
+            moved = moveVersionArchiveToTrash(r, cleanSlug, "human:gui");
+          } catch (me) {
+            return json(res, 400, { error: `归档移入回收站失败：${String(me?.message ?? me)}——版本未改动` });
+          }
+          if (!moved.ok) {
+            // 没有归档可搬：按普通删除路径走（非归档目标存在时 deleteVersion 会给权威错误）
+            const result = deleteVersion(r, { slug: cleanSlug, actor: "human:gui" });
+            return json(res, 200, { ok: true, ...result, archive_moved: null, archived_goals: 0 });
+          }
+          let result = null;
+          let delErr = null;
+          try {
+            result = deleteVersion(r, { slug: cleanSlug, actor: "human:gui" });
+          } catch (de) {
+            delErr = String(de?.message ?? de);
+          }
+          if (delErr) {
+            // 仍删不掉（例如还有非归档目标）→ 精确回滚归档目录，如实报告
+            let rolled = false;
+            let rollbackErr = null;
+            try {
+              restoreVersionArchiveFromTrash(r, cleanSlug, moved.dir, "human:gui");
+              rolled = true;
+            } catch (re) {
+              rollbackErr = String(re?.message ?? re);
+            }
+            const hint = rolled
+              ? `已回滚：归档目标已移回 versions/${cleanSlug}/archived/`
+              : `回滚失败（${rollbackErr}）——归档仍在回收站 _removed/${moved.dir}，可在回收站「已移除版本」区恢复`;
+            return json(res, 400, {
+              ok: false,
+              error: `删除失败：${delErr}。${hint}`,
+              archive_moved: rolled ? null : moved.dir,
+              rolled_back: rolled,
+              archive_dir: moved.dir,
+            });
+          }
+          return json(res, 200, {
+            ok: true,
+            ...result,
+            // 事件记录：autopilot.version_archive_trashed（搬移）/ version.deleted（删除）均已写入事件流
+            archive_moved: moved.dir,
+            archived_goals: moved.moved,
+          });
         } catch (e) {
           const code = e instanceof GraphError ? 400 : 500;
           json(res, code, { error: String(e?.message ?? e) });
@@ -5637,6 +5730,8 @@ export function apply(ctx, config) {
         },
       },
       // [autopilot-fork] 模板行：list / create / update / delete（统一 POST，避免 GET 查询串解析差异）
+      // [v0.34] 问题 7：支持 scope（workspace=本工作区 templates.json / global=<home>/.dsh/templates.json）；
+      // list 返回合并清单（全局在前），每条自带 scope 字段。
       {
         path: "/api/dsh-graph-autopilot/templates",
         handler: async (req, res) => {
@@ -5645,11 +5740,12 @@ export function apply(ctx, config) {
             const body = await readBody(req);
             const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
             const action = String(body.action ?? "list");
+            const scope = body.scope === "global" || body.scope === "workspace" ? body.scope : null;
             if (action === "list") return json(res, 200, { ok: true, templates: listTemplates(root) });
             if (action === "delete") {
               if (!body.id) return json(res, 400, { error: "missing id" });
-              deleteTemplate(root, String(body.id), "human:gui");
-              return json(res, 200, { ok: true, templates: listTemplates(root) });
+              const out = deleteTemplate(root, String(body.id), "human:gui", { scope });
+              return json(res, 200, { ok: true, ...out, templates: listTemplates(root) });
             }
             if (action === "create" || action === "update") {
               const tpl = saveTemplate(
@@ -5660,6 +5756,7 @@ export function apply(ctx, config) {
                   type: body.type,
                   description: body.description,
                   criteria: body.criteria,
+                  scope,
                 },
                 "human:gui",
               );
@@ -5670,6 +5767,7 @@ export function apply(ctx, config) {
         },
       },
       // [v0.29] 问题 9：由既有目标生成通用模板（读该目标 meta + body → templates.json；不消耗、可反复建目标）
+      // [v0.34] 问题 7：可传 scope 决定落本工作区还是全局（缺省 workspace，与旧行为一致）。
       {
         path: "/api/dsh-graph-autopilot/template-from-goal",
         handler: async (req, res) => {
@@ -5678,7 +5776,12 @@ export function apply(ctx, config) {
             const body = await readBody(req);
             if (!body.goal) return json(res, 400, { error: "missing goal" });
             const root = autopilotRoot(null, workspaceOf(req, body) ?? undefined);
-            const out = createTemplateFromGoal(root, String(body.goal), { name: body.name ?? null }, "human:gui");
+            const out = createTemplateFromGoal(
+              root,
+              String(body.goal),
+              { name: body.name ?? null, scope: body.scope === "global" ? "global" : "workspace" },
+              "human:gui",
+            );
             json(res, 200, { ok: true, template: out.template, templates: listTemplates(root) });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },
@@ -5722,6 +5825,12 @@ export function apply(ctx, config) {
             // [v0.19] 归档目标一键回草稿
             if (action === "to-draft") {
               if (!body.goal) return json(res, 400, { error: "missing goal" });
+              // [v0.34] force：带 cards/attempts 附件的目标也能暂存进草稿（moveGoalToDraftForce —— 整个目标
+              // 目录随附件搬入 backlog/<id>/goal.md）。不带 force 时保持原语义（带附件会被拒并给替代路径）。
+              if (body.force === true) {
+                const rf = moveGoalToDraftForce(root, String(body.goal), { actor: "human:gui" });
+                return json(res, 200, { ok: true, restored: rf.id, to: "backlog", forced: true, ...listTrash(root) });
+              }
               const r = restoreGoalToDraft(root, String(body.goal), "human:gui");
               return json(res, 200, { ok: true, restored: r.id, to: "backlog", ...listTrash(root) });
             }
@@ -6029,12 +6138,17 @@ export function apply(ctx, config) {
             const steward = st.steward && typeof st.steward === "object" ? st.steward : null;
             const stewardOn = steward?.enabled === true;
             const wantAdvance = st.advanceMode === true || stewardOn;
+            const nowMs = Date.now();
+            const cooldownOk = (iso, coolMs) => {
+              const t = iso ? Date.parse(iso) : 0;
+              return !Number.isFinite(t) || nowMs - t > coolMs;
+            };
             // —— 推进：确保「有未完结目标」的泳道有 runner 在跑 ——
             if (wantAdvance && !autopilotRunners.get(r)) {
               const openLanes = listLanesWithOpenGoals(r);
               if (openLanes.length) {
                 const lastTry = advanceStartAttempts.get(r) ?? 0;
-                if (Date.now() - lastTry > 10 * 60_000) {
+                if (nowMs - lastTry > 10 * 60_000) {
                   advanceStartAttempts.set(r, Date.now()); // 无论成败都进冷却：绝不反复冲击派发
                   const lane = openLanes[0].lane;
                   let started = null;
@@ -6060,6 +6174,113 @@ export function apply(ctx, config) {
                   if (startErr) autopilotLog(`推进模式起跑 ${lane} 失败（10 分钟后重试）：${startErr}`);
                 }
               }
+            }
+            // ═══ [v0.34] 问题 4：自治推进 —— runner 起不动时主动唤起管理员去分析并推动 ═══
+            // 旧逻辑只做「确保 runner 在跑」，链路被卡（如停在 review 的目标堵住整条链）时
+            // 它不会自己想办法（实测上游被反复重试 72 次而无人解决）。这里补上「起不动就叫人」：
+            // 泳道无可派发目标（laneReadiness.runnable 为空）且仍有非 draft/未交付目标 → 唤起管理子代理。
+            if (wantAdvance) {
+              try {
+                const stuck = scanStuckLanes(r, { isLive: (cid) => childLiveState(cid) !== "gone" }).filter((s) => s.stuck);
+                // 不按「有没有 runner」整体跳过：scanStuckLanes 是**逐泳道**判定——runner 正在跑的泳道
+                // 会有 in_progress 目标（判为在跑、不算卡住），因此这里只会命中真正的空闲卡死泳道
+                // （若整体跳过，runner 在 A 泳道跑、B 泳道卡死时就永远不会被处理）。
+                if (stuck.length && cooldownOk(st.advanceNudgedAt, 10 * 60_000)) {
+                  const brief = buildStuckLanesBrief(stuck);
+                  const prompt = [
+                    buildManagerPrompt(r, ws),
+                    "",
+                    "【本次特别任务：把卡住的泳道真正推向交付】",
+                    "以下泳道**没有任何可派发目标**，但仍有未交付目标——推进器起不动，必须由你介入分析并推动。",
+                    brief,
+                    "",
+                    "请按需推进：补判据（判据未确认就补齐并确认）、解阻塞（blocked 分析原因并解除）、",
+                    "改状态（停在 review 就按判据裁决——判据全打勾即接受、否则打回执行层；停在 planning 就补判据并起跑）、",
+                    "移泳道（确实不属于本泳道就 moveGoal 到正确泳道，或归档/移入回收站）。",
+                    "目标只有一个：**把本工作区除草稿外的全部目标推进到交付（delivered）**。",
+                    "每步操作后请在协作频道（graph_collab_post）登记原因。",
+                  ].join("\n");
+                  writeAutopilotState(r, { advanceNudgedAt: new Date().toISOString() }, { actor: "system:autopilot" });
+                  appendEvent(r, {
+                    actor: "system:autopilot",
+                    event: "autopilot.advance_stalled",
+                    details: {
+                      lanes: stuck.map((s) => s.lane),
+                      goals: stuck.flatMap((s) => s.blockers.map((b) => b.id)),
+                      mode: stewardOn ? "steward" : "advance",
+                    },
+                  });
+                  void spawnChild("graph:rec-manager(advance)", prompt, { on: () => {} }, r, { role: "pm" });
+                  autopilotLog(`推进模式：${stuck.length} 条泳道无可派发目标但有未完结目标 → 已唤起管理员（10 分钟冷却）`);
+                }
+              } catch (e) { autopilotLog(`卡住泳道检测失败（不影响定时器）：${String(e?.message ?? e)}`); }
+            }
+            // ═══ [v0.34] 问题 6：链路瓶颈自动唤起（gatekeeper 自己没阻塞，只是停着没推进） ═══
+            // /state 已显示 gatekeepers 但只作展示；这里让「挡住最多下游」的目标被自动处理。
+            // 已被 blocked 的 gatekeeper 交给上面的「阻塞自愈」，这里跳过（绝不重复唤起）。
+            if (wantAdvance) {
+              try {
+                const gatekeepers = listGatekeepers(r, 5);
+                const brief = buildGatekeepersBrief(gatekeepers);
+                if (brief && cooldownOk(st.gatekeeperNudgedAt, 10 * 60_000)) {
+                  const prompt = [
+                    buildManagerPrompt(r, ws),
+                    "",
+                    "【本次特别任务：打通链路瓶颈】",
+                    "以下目标挡住最多下游（下游在等它们交付才能派发），但它们自身并未被阻塞，只是停着没有推进：",
+                    brief,
+                    "",
+                    "请推进它们：停在 review 就按判据裁决（判据全打勾即接受、否则打回执行层并附未完成清单）；",
+                    "停在 planning/collecting 就补齐判据与描述并让泳道起跑；停在 in_progress 就检查 attempt 是否已成死结（必要时按流程重派）。",
+                    "推进后请在协作频道（graph_collab_post）登记原因；目标是把整条链路推到交付。",
+                  ].join("\n");
+                  writeAutopilotState(r, { gatekeeperNudgedAt: new Date().toISOString() }, { actor: "system:autopilot" });
+                  appendEvent(r, {
+                    actor: "system:autopilot",
+                    event: "autopilot.gatekeeper_auto_manager",
+                    details: {
+                      gatekeepers: gatekeepers.filter((g) => !g.blocked).map((g) => ({ goal: g.goal, waiting: g.waiting, status: g.status })),
+                      mode: stewardOn ? "steward" : "advance",
+                    },
+                  });
+                  void spawnChild("graph:rec-manager(gatekeeper)", prompt, { on: () => {} }, r, { role: "pm" });
+                  autopilotLog(`链路瓶颈：已唤起管理员处理 gatekeeper（10 分钟冷却）`);
+                }
+              } catch (e) { autopilotLog(`链路瓶颈检测失败（不影响定时器）：${String(e?.message ?? e)}`); }
+            }
+            // ═══ [v0.34] 问题 4 收尾：全部交付 → 写 advance_completed 并自动关闭 advanceMode ═══
+            // 用户要求：「跑到交付才可以停止，然后本工作区的托管功能自行关闭」。
+            // steward.enabled 为真时**不自动关闭**（全局托管是永续的），只写完成事件。
+            if (wantAdvance) {
+              try {
+                const adv = workspaceAdvanceStatus(r);
+                const completedAt = st.advanceCompletedAt ? Date.parse(st.advanceCompletedAt) : NaN;
+                const alreadyStamped = Number.isFinite(completedAt);
+                if (adv.done && adv.total > 0) {
+                  if (!alreadyStamped) {
+                    writeAutopilotState(r, { advanceCompletedAt: new Date().toISOString() }, { actor: "system:autopilot" });
+                    appendEvent(r, {
+                      actor: "system:autopilot",
+                      event: "autopilot.advance_completed",
+                      details: { total: adv.total, delivered: adv.delivered, steward: stewardOn },
+                    });
+                    autopilotLog(`目标推进完成：本工作区 ${adv.delivered}/${adv.total} 全部交付（除草稿外）`);
+                  }
+                  if (!stewardOn && st.advanceMode === true) {
+                    // 自动关闭本工作区推进模式（steward 永续：不关）
+                    writeAutopilotState(r, { advanceMode: false }, { actor: "system:autopilot" });
+                    appendEvent(r, {
+                      actor: "system:autopilot",
+                      event: "autopilot.advance_auto_off",
+                      details: { reason: "all-delivered", total: adv.total },
+                    });
+                    autopilotLog("目标推进模式已自动关闭（本工作区非草稿目标全部交付）");
+                  }
+                } else if (!adv.done && alreadyStamped) {
+                  // 新目标来了 → 清掉完成标记，下一轮交付后能再次写 advance_completed
+                  writeAutopilotState(r, { advanceCompletedAt: null }, { actor: "system:autopilot" });
+                }
+              } catch (e) { autopilotLog(`交付完成判定失败（不影响定时器）：${String(e?.message ?? e)}`); }
             }
             // —— 托管专属：推荐自动扫描 + 自动采纳到建议泳道 ——
             if (stewardOn) {

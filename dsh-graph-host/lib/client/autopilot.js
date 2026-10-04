@@ -256,11 +256,34 @@ function AutopilotPanel(props) {
   }, [load]);
 
   const running = !!(st?.runner && !st.runner.paused);
+  // [v0.34] 问题 5（前半）轮询修复：原实现**只在 running 时**开 4s 轮询 ⇒ 空闲/暂停时面板完全不
+  // 自我更新（归档、交付、恢复、别的窗口/主管会话改数据都看不见，必须手动刷新才出现）。
+  // 现在改成两档，依据是「数据变化只会来自人/管理 AI 的离散动作，不需要 4s 级实时」：
+  //   ① running：保持 4s 全量 load（跑动中需要紧跟 runner 快照）；
+  //   ② 空闲/暂停：常开 10s 的**轻量**轮询——只拉 state 端点并 setSt（不再重复拉
+  //      board/manager/collab/lane-prompt 那四个重端点），保证归档/交付/状态变化能自动出现。
   React.useEffect(() => {
     if (!running) return undefined;
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
   }, [running, st?.runner?.current, (st?.runner?.pending ?? []).length, load]);
+  React.useEffect(() => {
+    if (running || !workspace) return undefined;
+    // 轻量刷新：只更新 state 快照（归档行/托管开关/推荐条数）。其余端点（board/manager/collab）
+    // 仍只在 load() 里拉——避免空闲时每 10s 四次重请求。
+    const pullState = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return; // 后台零请求
+      fetch("/api/dsh-graph-autopilot/state?workspace=" + encodeURIComponent(workspace), { credentials: "same-origin" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (d?.ok) setSt(d); })
+        .catch(() => {});
+    };
+    const t = setInterval(pullState, 10000);
+    // [v0.34] 切回前台立即补一次（后台期间不轮询，回来时数据可能已过期）
+    const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") pullState(); };
+    try { document.addEventListener("visibilitychange", onVis); } catch { /* 无 document */ }
+    return () => { clearInterval(t); try { document.removeEventListener("visibilitychange", onVis); } catch { /* ignore */ } };
+  }, [running, workspace]);
 
   // [v0.30] laneSel/laneOpen 持久化后的恢复兜底：重启回来时编辑框必须显示该泳道**已保存**的职责，
   // 否则出现「已设置」标签 + 空编辑框，用户一点「保存泳道职责」就会把服务端已存的文本清掉（静默数据丢失）。
@@ -359,13 +382,90 @@ function AutopilotPanel(props) {
       .finally(() => { setBusy(""); load(); });
   };
 
+  // [v0.34] 问题 5：归档行动作——统一的「写成功后广播」路径。
+  // 真实原因（同步修复的一部分）：面板内的写操作此前只调本地 load()，**没有** dispatch 既有约定
+  // 事件 "autopilot:adopted" ⇒ 看板（kanban.js 监听该事件并 forceFreshRef+load）与其它底部行
+  // 都不知道数据变了；只有面板自己刷新。归档动作尤其明显（用户报「点击任务归档后要实时刷新出现」）。
+  // 这里统一：成功 → 先广播（看板强制刷新），再本地 load()。
+  const apBroadcast = () => {
+    try {
+      window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
+      window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { panel: true } }));
+    } catch { /* 极早期环境忽略 */ }
+  };
+  /** [v0.34] 面板内归档某已交付目标（原内联 post("archive") 的显式版本：带广播） */
+  const archiveFromPanel = (goalId) => {
+    if (!goalId || busy) return;
+    setBusy("archive:" + goalId);
+    fetch("/api/dsh-graph-autopilot/archive", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, goal: goalId }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })).catch(() => ({ ok: r.ok, d: {} })))
+      .then(({ ok, d }) => {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+        if (!ok || !d?.ok) { setMsg("❌ 归档失败：" + (d?.error ?? "未知错误")); return; }
+        setMsg("🗄 已归档：" + goalId);
+        apBroadcast();
+        load();
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setBusy(""));
+  };
+  /**
+   * [v0.34] 问题 5：面板「🗄 归档」行 + 回收站行的「→ 草稿」一键回草稿。
+   * 后端契约：POST /api/dsh-graph-autopilot/trash {action:"to-draft", goal, force:true}。
+   * force 的语义是「普通 moveGoal 被拒时才启用带附件迁移」，因此**先带 force 请求**即可：
+   * 后端在无附件时走普通路径（与旧行为一致），有附件时自动落到 force 路径。
+   * 兼容：若该端点尚未支持 force（旧后端），普通路径失败时回退调用
+   * /api/dsh-graph/move-to-draft {force:true}（既有路由，语义等价，保证按钮一键到底）。
+   */
+  const toDraftFromPanel = (goalId) => {
+    if (!goalId || busy) return;
+    setBusy("to-draft:" + goalId);
+    setMsg("");
+    fetch("/api/dsh-graph-autopilot/trash", {
+      method: "POST", credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, action: "to-draft", goal: goalId, force: true }),
+    })
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })).catch(() => ({ ok: r.ok, d: {} })))
+      .then(({ ok, d }) => {
+        if (ok && d?.ok) {
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+          setMsg("✅ 已回到草稿：" + goalId);
+          apBroadcast();
+          load();
+          return null;
+        }
+        // 回退：走既有的 /api/dsh-graph/move-to-draft（force:true）
+        return fetch("/api/dsh-graph/move-to-draft", {
+          method: "POST", credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ workspace, goal: goalId, force: true }),
+        })
+          .then((r) => r.json().then((d2) => ({ ok: r.ok, d2 })).catch(() => ({ ok: r.ok, d2: {} })))
+          .then(({ ok: ok2, d2 }) => {
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+            if (!ok2 || !d2?.ok) { setMsg("❌ → 草稿失败：" + (d2?.error ?? d?.error ?? "未知错误")); return null; }
+            setMsg("✅ 已回到草稿：" + goalId);
+            apBroadcast();
+            load();
+            return null;
+          });
+      })
+      .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
+      .finally(() => setBusy(""));
+  };
+
   return h("div", {
     "data-autopilot-panel": "",
     style: { display: "flex", flexDirection: "column", gap: 8, margin: "14px 0 10px", padding: "10px 12px", borderRadius: 10, border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", background: "var(--dsw-alias-fill-tsp-primary, rgba(128,128,128,.06))", fontSize: 12 },
   },
     // —— [v0.29] 🌐 托管（问题 4）：主功能 → 提到面板**最上面**，包一层显眼容器 ——
     // 显式色背景 + 蓝色左边框 + 加粗放大标题 + 两个 checkbox 之间留距；勾选态整块加高亮描边。
-    // 容器内保留两条 dg-hint 说明（走 apHint → 无提示模式下自动隐藏）。
+    // [v0.34] 问题 4：容器内的两条 apHint 说明已删除（用户嫌啰嗦）；checkbox 的 title 悬停说明保留。
     h("div", {
       "data-ap-steward": "",
       style: {
@@ -397,8 +497,8 @@ function AutopilotPanel(props) {
           "目标推进（不加新任务，推进到全部交付）",
         ),
       ),
-      apHint("🌐 全局托管：勾选后自动扫描/采纳/起跑并处理阻塞，持续不停、永不自动停；取消勾选即回到手动操作。"),
-      apHint("🌐 目标推进：勾选后不加新任务，只把非草稿任务全部推进到交付；取消勾选即恢复常规托管行为。"),
+      // [v0.34] 问题 4（后半）：两条托管说明（🌐 全局托管：… / 🌐 目标推进：…）按要求**删除**——
+      // 用户嫌啰嗦。两个 checkbox 的 title 悬停说明保留（上一行 h("input", { title: ... }) 原样未动）。
       // [v0.31] 链路瓶颈：把「整条链路堵在谁身上」直接写在最显眼处。
       // 实测背景：g-003 等 g-008、g-008 等 g-006，而 g-006 停在评审中 ⇒ 三个任务全堵，
       // 上游被反复重试 72 次。用户此前无从得知「该先处理谁」——这条提示解决它。
@@ -468,13 +568,14 @@ function AutopilotPanel(props) {
           onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) { setMsg("🔍 已按输入启动推荐扫描"); setRecHint(""); } return load(); }),
         }, "按输入推荐"),
         h("span", { style: { opacity: 0.65 } }, "把卡片拖到任意泳道即可建目标执行；或勾选后批量采纳"),
-        pickedIdxs.length > 0 && h("button", { style: btn, disabled: !!busy, onClick: () => post("adopt", { picks: pickedIdxs, version: null }).then(() => { setPicked({}); load(); }) }, "采纳所选 → backlog"),
+        // [v0.34] 问题 5：采纳会往看板落新目标 → 同走「写成功后广播」（否则看板要等自己的自动刷新）
+        pickedIdxs.length > 0 && h("button", { style: btn, disabled: !!busy, onClick: () => post("adopt", { picks: pickedIdxs, version: null }).then(() => { setPicked({}); apBroadcast(); load(); }) }, "采纳所选 → backlog"),
         pickedIdxs.length > 0 && versions.length > 0 && h(React.Fragment, null,
           h("select", { style: input, value: runVersion, onChange: (e) => setRunVersion(e.target.value) },
             h("option", { value: "" }, "选择版本…"),
             versions.map((v) => h("option", { key: v, value: v }, v)),
           ),
-          h("button", { style: btnPrimary, disabled: !!busy || !runVersion, onClick: () => post("adopt", { picks: pickedIdxs, version: runVersion, run: true }).then(() => { setPicked({}); load(); }) }, "采纳并 ▶ 自动执行"),
+          h("button", { style: btnPrimary, disabled: !!busy || !runVersion, onClick: () => post("adopt", { picks: pickedIdxs, version: runVersion, run: true }).then(() => { setPicked({}); apBroadcast(); load(); }) }, "采纳并 ▶ 自动执行"),
         ),
         // [v0.27] 采纳当前勾选 → 紧接着运行管理 AI（它读看板与协作频道，自行决定放哪条泳道、建哪些连线）
         recs.length > 0 && h("button", {
@@ -511,7 +612,7 @@ function AutopilotPanel(props) {
         h("div", { style: { display: "flex", gap: 6, alignItems: "center", marginTop: 2 } },
           h("span", { style: { opacity: 0.5, fontSize: 11 } }, "来源: " + (r.reason ?? "")),
           h("span", { style: { flex: 1 } }),
-          h("button", { style: { ...btn, fontSize: 11, padding: "2px 7px" }, disabled: !!busy, onClick: (e) => { e.stopPropagation(); post("adopt", { picks: [i + 1], version: null }).then(load); } }, "采纳"),
+          h("button", { style: { ...btn, fontSize: 11, padding: "2px 7px" }, disabled: !!busy, onClick: (e) => { e.stopPropagation(); post("adopt", { picks: [i + 1], version: null }).then(() => { apBroadcast(); load(); }); } }, "采纳"),
         ),
       )),
     ),
@@ -540,11 +641,23 @@ function AutopilotPanel(props) {
     // 评审模式已在看板设置里；跑动状态由泳道行头的 ▶/■ 表达。这里不再保留任何细字行或孤立文案
     // （不能只留空行/「▶ 当前未在运行」孤立提示）。
     // —— 归档行 ——
+    // [v0.34] 问题 5（问题 4 后半同源）：每一项（待归档的已交付目标）都带「→ 草稿」一键回草稿按钮。
+    // 后端契约：POST /api/dsh-graph-autopilot/trash {action:"to-draft", goal, force:true}；
+    // force 由后端在「普通路径被拒」时使用（带 cards/attempts 附件也能以目录形态落进草稿）。
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）；
+    // 本文件的「→ 草稿」只出现在这一行与回收站条目卡（回收站卡是既有实现，非任务台卡片）。
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "🗄 归档"),
       (st?.delivered ?? []).map((g) => h("span", { key: g.id, style: { display: "inline-flex", gap: 4, alignItems: "center" } },
         h("span", { style: chip }, g.id + " " + g.title),
-        h("button", { style: btn, disabled: !!busy, title: "归档该已交付目标", onClick: () => post("archive", { goal: g.id }).then(load) }, "归档"),
+        // [v0.34] 问题 5：一键回到草稿（带 force：有附件也能回；先普通路径、失败自动升级 force）
+        h("button", {
+          style: btn, disabled: !!busy,
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+          title: "一键回到草稿：把该目标直接暂存进「草稿」泳道（带卡片/执行记录附件时自动改用 force 路径）",
+          onClick: () => toDraftFromPanel(g.id),
+        }, busy === "to-draft:" + g.id ? "…" : "→ 草稿"),
+        h("button", { style: btn, disabled: !!busy, title: "归档该已交付目标", onClick: () => archiveFromPanel(g.id) }, busy === "archive:" + g.id ? "…" : "归档"),
       )),
       // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       (st?.delivered ?? []).length === 0 && h("span", { style: { opacity: 0.6 } }, "暂无待归档的已交付目标"),
@@ -759,11 +872,18 @@ function TemplateLane(props) {
     window.addEventListener("autopilot:adopted", h);
     return () => window.removeEventListener("autopilot:adopted", h);
   }, [load]);
-  // 实时刷新：展开时每 10 秒自动同步（折叠时不发请求，零开销）
+  // 实时刷新：展开时每 10 秒自动同步（折叠时不发请求，零开销；页面后台时跳过，切回立即补一次）
   React.useEffect(() => {
     if (collapsed) return undefined;
-    const t = setInterval(() => load(true), 10000);
-    return () => clearInterval(t);
+    const t = setInterval(() => {
+      // [v0.34] 问题 5：后台标签页零请求——隐藏时跳过这一拍；可见时照常 10s 同步。
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      load(true);
+    }, 10000);
+    // [v0.34] 切回前台若数据可能已过期（超过一个周期）→ 立刻补拉一次
+    const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") load(true); };
+    try { document.addEventListener("visibilitychange", onVis); } catch { /* 无 document */ }
+    return () => { clearInterval(t); try { document.removeEventListener("visibilitychange", onVis); } catch { /* ignore */ } };
   }, [collapsed, load]);
 
   const send = (body) => fetch("/api/dsh-graph-autopilot/templates", {
@@ -1064,6 +1184,9 @@ function TrashLane(props) {
         if (!ok) { setMsg("❌ " + (d?.error ?? "彻底删除失败")); return; }
         setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
         setMsg("🗑 已彻底删除（不可恢复）");
+        // [v0.34] 问题 5：彻底删除同样改变看板可见数据（目标/版本不再出现）→ 广播让看板强制刷新。
+        window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
+        window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { purged: true } }));
       })
       .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
       .finally(() => setBusy(""));
@@ -1089,11 +1212,17 @@ function TrashLane(props) {
     window.addEventListener("autopilot:trash-changed", h);
     return () => window.removeEventListener("autopilot:trash-changed", h);
   }, [load]);
-  // 实时刷新：展开时每 10 秒自动同步
+  // 实时刷新：展开时每 10 秒自动同步（后台标签页跳过；切回前台立即补拉一次）
   React.useEffect(() => {
     if (collapsed) return undefined;
-    const t = setInterval(() => load(true), 10000);
-    return () => clearInterval(t);
+    const t = setInterval(() => {
+      // [v0.34] 问题 5：隐藏时零请求；可见时照常 10s 同步
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      load(true);
+    }, 10000);
+    const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") load(true); };
+    try { document.addEventListener("visibilitychange", onVis); } catch { /* 无 document */ }
+    return () => { clearInterval(t); try { document.removeEventListener("visibilitychange", onVis); } catch { /* ignore */ } };
   }, [collapsed, load]);
 
   const restore = (body) => {
@@ -1165,13 +1294,35 @@ function TrashLane(props) {
     return "堆叠 " + members.length + " 项" + (label ? " · " + label.slice(0, 8) : "");
   };
   const liveStacks = (data.stacks ?? []).map((s) => ({ s, members: liveMembers(s) })).filter((x) => x.members);
+  // [v0.34] 问题 9：**堆叠后外部不再占位** —— 已被任何 liveStacks 覆盖的条目从普通列表里排除，
+  // 否则同一目标会出现两次（堆叠格内一次 + 普通列表里各占一张卡，即用户截图里的重复卡片）。
+  // 口径与上方 liveMembers 完全一致：goal 按 id、version 按 dir/slug/name 任一命中即算「已被堆叠覆盖」；
+  // 已被覆盖但堆叠本身被判死（成员不足 2 项）的条目**仍留在普通列表**，不会凭空消失。
+  const stackedGoalKeys = new Set();
+  const stackedVersionKeys = new Set();
+  for (const { members } of liveStacks) {
+    for (const it of members) {
+      if (!it) continue;
+      if (it.kind === "version") stackedVersionKeys.add(String(it.key));
+      else stackedGoalKeys.add(String(it.key));
+    }
+  }
+  /** 该目标是否已被某个「仍存在」的堆叠收录（goal 按 id 匹配） */
+  const goalStacked = (g) => stackedGoalKeys.has(String(g?.id));
+  /** 该版本是否已被某个「仍存在」的堆叠收录（version 按 dir/slug/name 任一匹配，与 memberAlive 同口径） */
+  const versionStacked = (v) => [v?.dir, v?.slug, v?.name].some((k) => k != null && stackedVersionKeys.has(String(k)));
+  /** 普通列表里实际要渲染的条目（排除已被堆叠覆盖的） */
+  const looseGoals = (data.goals ?? []).filter((g) => !goalStacked(g));
+  const looseVersions = (data.versions ?? []).filter((v) => !versionStacked(v));
 
   const total = data.goals.length + data.versions.length;
   const children = [
-    data.versions.length > 0 && h("div", { key: "v", style: { display: "flex", flexDirection: "column", gap: 4 } },
+    // [v0.34] 问题 9：整节以 **loose** 条目为准——全被堆叠覆盖时小节不渲染（不留空标题）。
+    // i18n-keep(category-a)：本处小节标题沿用既有中文（未新增 i18n 词条）。
+    looseVersions.length > 0 && h("div", { key: "v", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已移除的版本泳道（恢复后回到看板，数据完整）"),
       h("div", { style: { display: "flex", flexWrap: "wrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
-        data.versions.map((v) => h("div", {
+        looseVersions.map((v) => h("div", {
           key: v.dir,
           style: { background: "var(--dsw-alias-bg-card, rgba(24,26,32,.85))", borderRadius: 8, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-secondary, rgba(128,128,128,.3))", borderLeft: "3px solid #8a8f98", display: "flex", flexDirection: "column", gap: 4, fontSize: 12 },
         },
@@ -1190,7 +1341,9 @@ function TrashLane(props) {
             }, purgePending === `version:${v.dir}` ? "确认彻底删除？" : "🗑 彻底删除"),
           ),
         )))),
-    data.goals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
+    // [v0.34] 问题 9：**「已归档的目标」小节以 looseGoals 为准**（原条件 data.goals.length > 0）——
+    // 目标全部被堆叠覆盖时该小节整体不渲染，不留空标题 + 孤立的「↩ 全部撤回草稿」按钮。
+    looseGoals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
         // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已归档的目标（恢复后回到原泳道）"),
@@ -1202,7 +1355,7 @@ function TrashLane(props) {
         }, busy === "restore-all-draft" ? "…" : "↩ 全部撤回草稿"),
       ),
       h("div", { style: { display: "flex", flexWrap: "wrap", overflowX: "auto", gap: 8, paddingBottom: 4 } },
-        data.goals.map((g) => h("div", {
+        looseGoals.map((g) => h("div", {
           key: g.id,
           draggable: true,
           // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。

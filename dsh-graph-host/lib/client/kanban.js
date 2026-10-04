@@ -2423,8 +2423,24 @@
         rows.push(...lane(`🏷️ ${singleVersion.name}`, singleVersion.goals, "v-" + singleVersion.slug, singleVersion.slug, 0, false, true));
       }
       let laneIndex = 0;
+      // [v0.34] 问题 8（前半）：**显示层稳定分组**——常驻功能分组（部署 / 交互 / 后端）的泳道
+      // 永远排在普通版本泳道**之上**，普通版本泳道之间保持载荷给的原顺序（版本号倒序）。
+      // 背景与判据：后端 boardProjection 用 readdirSync(vdir).sort(compareVersions)，而
+      // compareVersions 的 GROUP_ORDER 前缀判定已把 deploy-test/interaction/backend 固化在最前
+      //（2026-10-01 实测 GET /api/dsh-graph 返回顺序 = 部署→交互→后端→第一版 ⇒ **后端排序正确**）。
+      // 但显示层此前**直接按载荷顺序推入**（`for (const v of active)`）：一旦后端排序因平台
+      // 目录枚举差异（readdirSync 在 UTF-16 序下 'V' < 'b' < 'd' < 'i' 会把 V0.1 排到最前）/
+      // 本地 dist 未重建而回退，用户就会看到「第一版」压在「部署/交互/后端」上面。
+      // 本处只做**只读的渲染批次重排**：不新增状态真源、不改载荷、不动后端。
+      // 判据复用工厂作用域既有的 isDefaultGroup(slug)（AP_DEFAULT_GROUP_SLUGS），不新增第二套名单。
+      // 稳定性：两批内部各自保序（Array.filter 保序）⇒ 后端顺序正确时显示结果与之一致；
+      // 后端回退时仍保证「分组在上、普通版本按版本号倒序在下」。
+      const groupLaneVersions = active.filter((v) => isDefaultGroup(v.slug));
+      const normalLaneVersions = active.filter((v) => !isDefaultGroup(v.slug));
       // g-366：搜索聚合泳道激活时同样不渲染任何常规泳道（singleColumnMode = 单泳道档 ∪ 搜索档）
-      for (const v of (singleColumnMode ? [] : active)) {
+      // [v0.34] 渲染序 = 常驻分组批 ++ 普通版本批（两批拼接后仍走同一个 lane() 渲染路径，不复制第二套）。
+      const laneOrderedActive = singleColumnMode ? [] : groupLaneVersions.concat(normalLaneVersions);
+      for (const v of laneOrderedActive) {
         rows.push(...lane(`🏷️ ${v.name}`, v.goals, "v-" + v.slug, v.slug, laneIndex));
         laneIndex++;
       }
@@ -4196,6 +4212,109 @@
       const dotColor = (live) => (live === "running" ? "#3aa675" : live === "idle" ? "#e0a53a" : "#8a8a8a");
       // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       const liveLabel = { running: "运行中", idle: "空闲", gone: "已结束", unknown: "未知" };
+      // [v0.34] 问题 2（重点）：执行板统计与聚合。
+      // 数据口径（严格「有则显示、无则 —，绝不编造」）：
+      //   现有接口 GET /api/dsh-graph/agents 的字段为 goal/lane/attempt/child_id/parent_session_id/
+      //   session_id/live/provider/model/detached/started_at/tokens/context_size。
+      //   其中 tokens 是**总量**（host 侧取自 session.usage.totalTokens），接口**没有**独立的
+      //   「输出 token / 输入 token」字段 ⇒ 本处对 out_tokens/in_tokens 只在后端补出时读取显示，
+      //   缺字段一律渲染「—」（聚合值也显示「—」而不是 0 或猜测值）。
+      //   同理「正在写入/读取的文件」「累计修改文件数」接口当前也未提供 ⇒ 读 writing/reading/
+      //   files_changed/files_written 等可能的别名字段，缺字段显示「—」。
+      // 兼容读法：任一别名字段命中且为有限数字/非空数组时才算「可得」。
+      const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      const pickNum = (o, names) => {
+        for (const n of names) { const v = num(o?.[n]); if (v != null) return v; }
+        return null;
+      };
+      const pickList = (o, names) => {
+        for (const n of names) {
+          const v = o?.[n];
+          if (Array.isArray(v) && v.length) return v.map((x) => String(x));
+        }
+        return null;
+      };
+      // 千分位；null/缺失 → 「—」
+      const fmtNum = (v) => (v == null ? "—" : String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ","));
+      // [v0.34] 问题 2：文件路径压短显示（保留末两段 + 省略号前缀），避免长路径撑破卡面
+      const shortFile = (f) => {
+        const s = String(f ?? "");
+        const parts = s.split(/[\\/]+/).filter(Boolean);
+        return parts.length > 2 ? "…/" + parts.slice(-2).join("/") : s;
+      };
+      // 求和：全为空 → null（显示「—」），不是 0
+      const sumOrNull = (arr) => {
+        let any = false; let sum = 0;
+        for (const v of arr) { if (v != null) { any = true; sum += v; } }
+        return any ? sum : null;
+      };
+      const agentOf = (a) => {
+        const outTokens = pickNum(a, ["out_tokens", "output_tokens", "outputTokens", "completion_tokens"]);
+        const inTokens = pickNum(a, ["in_tokens", "input_tokens", "inputTokens", "prompt_tokens"]);
+        return {
+          a,
+          live: a?.live ?? "unknown",
+          outTokens,
+          inTokens,
+          totalTokens: num(a?.tokens),
+          filesWriting: pickList(a, ["writing", "writing_files", "files_writing"]),
+          filesReading: pickList(a, ["reading", "reading_files", "files_reading", "files_touched"]),
+          filesChanged: pickNum(a, ["files_changed", "filesChanged", "files_written", "changed_files"]),
+        };
+      };
+      const agentRows = (Array.isArray(agents) ? agents : []).map(agentOf);
+      const stats = {
+        total: Array.isArray(agents) ? agents.length : 0,
+        running: runningCount,
+        outTotal: sumOrNull(agentRows.map((r) => r.outTokens)),
+        inTotal: sumOrNull(agentRows.map((r) => r.inTokens)),
+        tokensTotal: sumOrNull(agentRows.map((r) => r.totalTokens)),
+        filesTotal: sumOrNull(agentRows.map((r) => r.filesChanged)),
+      };
+      // 按目标 / 按模型聚合（token 与运行数）；键缺失时归入「—」桶
+      const groupBy = (keyOf) => {
+        const m = new Map();
+        for (const r of agentRows) {
+          const k = keyOf(r.a) ?? "—";
+          if (!m.has(k)) m.set(k, { key: k, count: 0, running: 0, tokens: [], out: [], in: [] });
+          const g = m.get(k);
+          g.count++;
+          if (r.live === "running") g.running++;
+          g.tokens.push(r.totalTokens); g.out.push(r.outTokens); g.in.push(r.inTokens);
+        }
+        return [...m.values()].map((g) => ({
+          key: g.key, count: g.count, running: g.running,
+          tokens: sumOrNull(g.tokens), out: sumOrNull(g.out), in: sumOrNull(g.in),
+        })).sort((x, y) => (y.tokens ?? -1) - (x.tokens ?? -1) || y.count - x.count || String(x.key).localeCompare(String(y.key)));
+      };
+      const byGoal = groupBy((a) => a?.goal);
+      const byModel = groupBy((a) => (a?.provider || a?.model) ? String(a?.provider ?? "—") + "/" + String(a?.model ?? "—") : null);
+      // 活跃文件表：多个子代理动同一文件 ⇒ 高亮冲突
+      const fileMap = new Map();
+      for (const r of agentRows) {
+        const add = (list, kind) => {
+          for (const f of (list ?? [])) {
+            if (!fileMap.has(f)) fileMap.set(f, { file: f, writers: [], readers: [] });
+            const e = fileMap.get(f);
+            const who = String(r.a?.goal ?? "?") + "·" + String(r.a?.attempt ?? "?");
+            (kind === "write" ? e.writers : e.readers).push(who);
+          }
+        };
+        add(r.filesWriting, "write");
+        add(r.filesReading, "read");
+      }
+      const activeFiles = [...fileMap.values()]
+        .sort((x, y) => (y.writers.length + y.readers.length) - (x.writers.length + x.readers.length) || x.file.localeCompare(y.file));
+      const conflictCount = activeFiles.filter((e) => e.writers.length > 1 || (e.writers.length > 0 && e.readers.length > 0)).length;
+      const hasFileData = activeFiles.length > 0;
+      // 统计条配色：显眼但不刺眼（深底 + 高对比文字，不用 var(--dsw-alias-*) —— 本机主题下会解析成白底白字）
+      const AB_STAT = { display: "flex", alignItems: "baseline", gap: 5, padding: "3px 9px", borderRadius: 6, border: "1px solid rgba(140,145,155,.4)", background: "#23252e", whiteSpace: "nowrap", flexShrink: 0 };
+      const AB_STAT_NUM = { fontSize: 15, fontWeight: 800, letterSpacing: 0.2, fontVariantNumeric: "tabular-nums" };
+      const AB_STAT_LBL = { fontSize: 10, opacity: 0.75 };
+      const statChip = (label, value, color, title) => h("span", {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案（统计条标签 / 悬浮说明）按要求直接使用中文（不新增 i18n 词条）。
+        key: "st-" + label, style: { ...AB_STAT, borderColor: color + "66" }, title: title ?? (label + "：" + value),
+      }, h("span", { style: { ...AB_STAT_NUM, color } }, value), h("span", { style: AB_STAT_LBL }, label));
       const AB_BTN = { fontSize: 11, padding: "1px 6px", cursor: "pointer", background: "#2b2f3a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, flexShrink: 0, whiteSpace: "nowrap" };
       const AB_INPUT = { background: "#20222a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, padding: "3px 6px", fontSize: 12, flex: 1, minWidth: 0, boxSizing: "border-box" };
       const card = (a) => {
@@ -4203,12 +4322,24 @@
         const key = childId || (String(a?.goal ?? "?") + "#" + String(a?.attempt ?? "?"));
         const sel = childId ? selected.has(childId) : false;
         const live = a?.live ?? "unknown";
+        // [v0.34] 问题 2：每卡的统计行 —— 输出/输入 token（缺字段显示「—」，不编造）、
+        // 正在读写的文件（接口未提供时显示「—」）、累计修改文件数（同上）。
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+        const r = agentOf(a);
+        const filesText = [
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+          r.filesWriting ? "写：" + r.filesWriting.map((f) => shortFile(f)).join("、") : null,
+          r.filesReading ? "读：" + r.filesReading.map((f) => shortFile(f)).join("、") : null,
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+        ].filter(Boolean).join("；");
         return h("div", {
           key,
           className: "dg-agents-card",
           "data-agents-child-id": childId || undefined,
-          // [v0.29] 问题 2：页签形态卡片更宽（0 1 320px → 1 1 460px）；看板内嵌形态尺寸不变。
-          style: { minWidth: 0, flex: tabMode ? "1 1 460px" : "0 1 320px", border: "1px solid rgba(140,145,155,.35)", borderRadius: 6, padding: "6px 8px", background: "rgba(128,128,128,.07)", display: "flex", flexDirection: "column", gap: 3 },
+          // [v0.34] 问题 2：版式更紧凑、信息密度更高 —— 页签形态改为**单行/单卡**清单式
+          //（整行占满宽度，卡内三行：标识行 / 指标行 / 明细行），不再用 460px 卡片流式换行。
+          // 看板内嵌形态（非 tab）尺寸不变（向后兼容 v0.28 语义）。
+          style: { minWidth: 0, flex: tabMode ? "1 1 100%" : "0 1 320px", border: "1px solid rgba(140,145,155,.35)", borderRadius: 6, padding: "4px 8px", background: "rgba(128,128,128,.07)", display: "flex", flexDirection: "column", gap: 2 },
         },
           h("div", { style: { display: "flex", alignItems: "center", gap: 6, minWidth: 0 } },
             h("input", {
@@ -4221,6 +4352,9 @@
             h("span", { title: liveLabel[live] ?? String(live), style: { flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: dotColor(live), display: "inline-block" } }),
             h("span", { style: { fontSize: 12, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, String(a?.goal ?? "(未知目标)")),
             a?.attempt != null ? h("span", { style: { fontSize: 10, opacity: 0.7, flexShrink: 0 } }, "att " + String(a.attempt)) : null,
+            a?.lane ? h("span", { style: { fontSize: 10, opacity: 0.55, flexShrink: 0 } }, String(a.lane)) : null,
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+            h("span", { style: { fontSize: 10, flexShrink: 0, color: dotColor(live) } }, liveLabel[live] ?? String(live)),
             h("span", { style: { flex: 1 } }),
             h("button", {
               className: "dg-btn", style: AB_BTN,
@@ -4231,15 +4365,26 @@
               // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               ? sessionLinkBtn(a.parent_session_id, childId, "↗ 转到对话")
               : h("button", { className: "dg-btn", style: { ...AB_BTN, opacity: 0.45, cursor: "default" }, disabled: true, title: "缺少子会话 id，无法跳转" }, "↗ 转到对话")),
-          h("div", { style: { fontSize: 11, opacity: 0.85, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
+          // [v0.34] 问题 2：指标行 —— 输出/输入 token、总量、改动文件数（缺失一律「—」）
+          h("div", { style: { fontSize: 11, opacity: 0.9, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
             h("span", null, "模型：" + (a?.provider ?? "—") + "/" + (a?.model ?? "—")),
-            h("span", null, "tokens：" + (a?.tokens != null ? String(a.tokens) : "—")),
-            h("span", null, "ctx：" + (a?.ctx_pct != null ? String(a.ctx_pct) + "%" : "—")),
-            a?.session_id ? h("span", { style: { opacity: 0.6, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "sid " + String(a.session_id).slice(0, 10) + "…") : null),
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+            h("span", { style: { color: r.outTokens != null ? "#7fb2ff" : undefined } }, "输出 token：" + fmtNum(r.outTokens)),
+            h("span", { style: { color: r.inTokens != null ? "#c9a4ff" : undefined } }, "输入 token：" + fmtNum(r.inTokens)),
+            h("span", null, "总 token：" + fmtNum(r.totalTokens)),
+            h("span", null, "改动文件：" + fmtNum(r.filesChanged)),
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+            h("span", { style: { opacity: 0.7 } }, "ctx：" + fmtNum(r.a?.context_size))),
+          // [v0.34] 问题 2：读写文件行（接口未提供时显示「—」而非留空）
+          h("div", { style: { fontSize: 11, opacity: 0.8, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+            h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+              "正在读写：" + (filesText || "—")),
+            a?.session_id ? h("span", { style: { opacity: 0.55, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "sid " + String(a.session_id).slice(0, 10) + "…") : null),
           // [v0.29] 问题 2：页签/侧边栏形态追加明细列（session id / parent_session_id /
           // started_at / detached）——比看板内嵌形态更详细；字段缺失一律显示「—」。
           tabMode
-            ? h("div", { style: { fontSize: 11, opacity: 0.8, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
+            ? h("div", { style: { fontSize: 11, opacity: 0.75, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
                 h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "session id：" + (a?.session_id ?? "—")),
                 h("span", null, "parent：" + (a?.parent_session_id ?? "—")),
                 h("span", null, "started：" + (a?.started_at ?? "—")),
@@ -4265,7 +4410,8 @@
             !workspace ? "（工作区未确定）" : agents == null ? "（读取中…）" : ("运行中 " + runningCount + " / 共 " + agents.length)),
           h("span", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
             tabMode
-              ? "当前工作区子代理会话一览；10 秒自动刷新，可勾选多张卡批量发送消息（明细含 session/parent/started/detached）"
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+              ? "当前工作区子代理一览：顶部统计条 + 每行一张卡（状态/token/读写文件/模型/会话）+ 底部汇总（按目标、按模型、活跃文件冲突高亮）；10 秒自动刷新，可勾选多张卡批量发送消息"
               : "当前工作区子代理会话一览；展开后 10 秒自动刷新，可勾选多张卡批量发送消息"),
           // [v0.29] 问题 2：页签形态不提供折叠开关（它就是这个页签的全部内容，收起等于空白页）
           tabMode ? null : h("button", {
@@ -4275,10 +4421,98 @@
           // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           }, open ? "收起" : "展开")),
         err ? h("div", { style: { fontSize: 11, color: "#f08080", marginTop: 2 } }, "读取失败：" + err) : null,
+        // [v0.34] 问题 2：顶部统计条 —— 总子代理数 / 运行中 / 输出 token 合计 / 输入 token 合计 /
+        // 累计修改文件数。全部取自同一份 agents 载荷（零新增请求、零新增状态真源）；
+        // 接口未提供的字段（输出/输入 token、改动文件数）聚合值显示「—」，不显示 0 也不编造。
+        open && Array.isArray(agents)
+          ? h("div", {
+              className: "dg-agents-stats",
+              "data-dsh-agents-stats": "",
+              style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6, minWidth: 0, alignItems: "stretch" },
+            },
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+              statChip("总子代理", fmtNum(stats.total), "#e6e6e6", "本工作区已绑定子代理的 attempt 总数（含已结束）"),
+              statChip("运行中", fmtNum(stats.running), "#3aa675", "live=running 的子代理数"),
+              statChip("输出 token 合计", fmtNum(stats.outTotal), "#7fb2ff", "所有子代理输出 token 之和（接口未提供该字段时显示「—」）"),
+              statChip("输入 token 合计", fmtNum(stats.inTotal), "#c9a4ff", "所有子代理输入 token 之和（接口未提供该字段时显示「—」）"),
+              statChip("总 token 合计", fmtNum(stats.tokensTotal), "#e0a53a", "所有子代理 tokens 字段之和（接口给的是总量）"),
+              statChip("累计修改文件数", fmtNum(stats.filesTotal), "#4cc9c9", "所有子代理累计修改文件数之和（接口未提供该字段时显示「—」）"),
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+              activeFiles.length
+                ? statChip("冲突文件", fmtNum(conflictCount), conflictCount > 0 ? "#f08080" : "#8a8a8a", "多个子代理同时写入（或边写边读）同一文件的数量")
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+                : null)
+          : null,
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
         open && Array.isArray(agents)
           ? (agents.length
-              ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6, minWidth: 0 } }, ...agents.map(card))
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+              ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6, minWidth: 0, flexDirection: tabMode ? "column" : "row" } }, ...agents.map(card))
               : h("div", { style: { fontSize: 11, opacity: 0.7, marginTop: 4 } }, "暂无子代理会话（执行中的目标派发子代理后会出现在这里）"))
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+          : null,
+        // [v0.34] 问题 2：汇总区（页签/侧边栏形态展示；看板内嵌形态保持 v0.28 精简版式不变）——
+      // i18n-keep(category-a)：任务执行板的新增中文 UI 文案（按项目约定直接使用中文）。
+        // ① 按目标聚合 ② 按模型聚合 ③ 当前活跃文件列表（多写/边写边读高亮冲突）。
+        open && tabMode && Array.isArray(agents) && agents.length
+          ? h("div", {
+              className: "dg-agents-summary",
+              "data-dsh-agents-summary": "",
+              style: { marginTop: 8, paddingTop: 6, borderTop: "1px dashed rgba(140,145,155,.4)", display: "flex", flexDirection: "column", gap: 6, minWidth: 0 },
+            },
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+              h("div", { style: { fontSize: 12, fontWeight: 700 } }, "📊 汇总"),
+              h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 0 } },
+                h("div", { style: { fontSize: 11, fontWeight: 600, opacity: 0.85 } }, "按目标聚合（token 合计 / 子代理数）"),
+                ...byGoal.map((g) => h("div", {
+                  key: "bg-" + g.key,
+                  style: { fontSize: 11, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0, opacity: 0.9 },
+                },
+                  h("span", { style: { fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, String(g.key)),
+                  h("span", null, "总 " + fmtNum(g.tokens)),
+                  h("span", null, "出 " + fmtNum(g.out)),
+                  h("span", null, "入 " + fmtNum(g.in)),
+                  h("span", { style: { opacity: 0.7 } }, g.count + " 个" + (g.running ? "（运行中 " + g.running + "）" : ""))))),
+              h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 0 } },
+                // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+                h("div", { style: { fontSize: 11, fontWeight: 600, opacity: 0.85 } }, "按模型聚合（token 合计 / 子代理数）"),
+                ...byModel.map((g) => h("div", {
+                  key: "bm-" + g.key,
+                  style: { fontSize: 11, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0, opacity: 0.9 },
+                },
+                  h("span", { style: { fontWeight: 600 } }, String(g.key)),
+                  h("span", null, "总 " + fmtNum(g.tokens)),
+                  h("span", null, "出 " + fmtNum(g.out)),
+                  h("span", null, "入 " + fmtNum(g.in)),
+                  h("span", { style: { opacity: 0.7 } }, g.count + " 个" + (g.running ? "（运行中 " + g.running + "）" : ""))))),
+              h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 0 } },
+                // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+                h("div", { style: { fontSize: 11, fontWeight: 600, opacity: 0.85 } },
+                  "活跃文件" + (activeFiles.length ? "（" + activeFiles.length + " 个" + (conflictCount ? "，冲突 " + conflictCount : "") + "）" : "")),
+                hasFileData
+                  ? h("div", { style: { display: "flex", flexDirection: "column", gap: 2, minWidth: 0 } },
+                      ...activeFiles.map((e) => {
+                        const conflict = e.writers.length > 1 || (e.writers.length > 0 && e.readers.length > 0);
+                        return h("div", {
+                          key: "af-" + e.file,
+                          style: {
+                            fontSize: 11, display: "flex", gap: 6, flexWrap: "wrap", minWidth: 0,
+                            // 冲突高亮：红底 + 红边（显式配色，不依赖主题别名）
+                            background: conflict ? "rgba(240,128,128,.14)" : "transparent",
+                            border: conflict ? "1px solid rgba(240,128,128,.55)" : "1px solid transparent",
+                            borderRadius: 4, padding: "1px 4px",
+                          },
+                          title: e.file,
+                        },
+                          h("span", { style: { color: conflict ? "#ffb3b3" : "#e6e6e6", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                            (conflict ? "⚠ " : "") + shortFile(e.file)),
+      // i18n-keep(category-a)：活跃文件读写统计的新增中文文案。
+                          e.writers.length ? h("span", { style: { color: "#ffb3b3" } }, "写 " + e.writers.length + "：" + e.writers.join("、")) : null,
+                          e.readers.length ? h("span", { style: { opacity: 0.75 } }, "读 " + e.readers.length + "：" + e.readers.join("、")) : null);
+                      }))
+                  : h("div", { style: { fontSize: 11, opacity: 0.7 } },
+                      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+                      "—（接口暂未提供「正在读写的文件」字段；后端补齐后此处自动显示）")))
           : null,
         open && selected.size > 0
           ? h("div", { style: { marginTop: 6, padding: "6px 8px", border: "1px solid rgba(76,141,255,.4)", borderRadius: 6, background: "rgba(76,141,255,.07)", display: "flex", flexDirection: "column", gap: 4 } },
