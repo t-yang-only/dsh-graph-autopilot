@@ -6217,7 +6217,20 @@ export function apply(ctx, config) {
                   const lane = openLanes[0].lane;
                   let started = null;
                   let startErr = null;
+                  // [v0.36.1] 起跑前先过门禁：该泳道可派发目标若**全被连线门禁挡住**，起跑只会立刻
+                  // 结束（空转）。此时改为推前置泳道（下面的 prerequisite 分支），或静默等待。
+                  let advanceGated = false;
                   try {
+                    const plan = laneReadiness(r, lane, { isLive: (cid) => childLiveState(cid) !== "gone" });
+                    const cands = [...plan.runnable];
+                    if (cands.length > 0) {
+                      const blockedAll = cands.every((id) => { try { return linkGateReport(r, id, {}).blocked === true; } catch { return false; } });
+                      if (blockedAll) advanceGated = true;
+                    }
+                  } catch { /* 判定失败则照常起跑 */ }
+                  if (advanceGated) {
+                    startErr = "被连线门禁挡住（不空转，等前置交付或由恢复分支推前置）";
+                  } else try {
                     started = autopilotStart(r, lane, st.reviewMode, "system:autopilot");
                   } catch (se) {
                     startErr = String(se?.message ?? se).slice(0, 300);
