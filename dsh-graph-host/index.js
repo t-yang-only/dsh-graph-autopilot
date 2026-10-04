@@ -201,6 +201,7 @@ import {
   moveGoalToDraftForce,
   listBlockedGoals,
   reapStaleAttempts,
+  laneHealth,
   listRegistry,
   setCriteriaChecked,
   unmetCriteria,
@@ -5211,7 +5212,7 @@ export function apply(ctx, config) {
             parameters: params({
               action: {
                 type: "string",
-                description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|steward_set|advance_mode_set|catalog_list|settings_get|settings_set|links_list|links_add|links_remove|stale_check|stale_reap|links_check|links_bulk|status",
+                description: "lane_prompt_get|lane_prompt_set|trash_list|trash_restore|trash_purge|trash_to_draft|collab_post|collab_read|recs_scan|recs_adopt|deep_scan|global_goal_set|global_prompt_set|review_mode_set|manager_get|manager_set|manager_run|steward_set|advance_mode_set|catalog_list|settings_get|settings_set|links_list|links_add|links_remove|stale_check|stale_reap|health|links_check|links_bulk|status",
               },
               links: { type: "array", description: "[v0.30] links_bulk：要新增的连线数组 [{from, to, kind}]（kind: start=开始连接 / end=结束连接 / mid=实时协作）。已存在（同 from+to+kind）记为 skipped 不算错误；非法条目进 errors 并继续处理其余条目。" },
               settings: { type: "object", description: "[v0.28] settings_set 的设置对象（看板设置）：globalPrompt/globalGoal/autoPreset/reviewMode/managerPrompt/managerEnabled/managerIntervalMin/managerUpdateGlobals/lanePrompts/laneModels/advanceMode/steward({enabled})。profile 级设置（subagentProvider/subagentModel/subagentMode/subagentReasoningEffort/subagentPrompt/promptLanguage）由 DSH 设置页写入，本 action 不写并会在 skipped 里说明。" },
@@ -5446,6 +5447,18 @@ export function apply(ctx, config) {
                   : "没有陈旧的进行中 attempt（任务卡住可能是其它原因：判据未确认 / 连线门禁 / 泳道无 ready 目标）",
               };
             }
+            // [v0.31] 泳道健康：把「反复派发却没成功」这类隐性卡点变成可见数据
+            case "health": {
+              const rows0 = laneHealth(root, a.lane ?? null);
+              const bad = rows0.filter((x) => x.churning || x.stuck);
+              return {
+                ok: true,
+                goals: rows0,
+                summary: bad.length
+                  ? `${bad.length} 个目标需要关注：${bad.slice(0, 5).map((x) => `${x.goal}(${x.attempts}次${x.stuck ? "，" + x.stuck : "，反复空转"}）`).join("；")}`
+                  : "全部健康：没有反复空转或卡住的目标",
+              };
+            }
             case "stale_reap": {
               const done = reapStaleAttempts(root, { isLive: (cid) => { const s = childLiveState(cid); return s === "running" || s === "idle"; }, actor: autopilotActor(ex) });
               return { ok: true, reaped: done.reaped, kept: done.kept };
@@ -5496,9 +5509,25 @@ export function apply(ctx, config) {
             // [v0.30] link_blocked：当前因连线门禁（start/end 连线前置未交付）而等待的目标与它在等谁。
             // 没有任何连线时跳过整轮目标扫描（该端点被看板轮询，保持零额外开销）。
             let linkBlocked = [];
+            // [v0.31] 链路瓶颈（gatekeepers）：被最多下游等待的目标 = 整条链路真正堵在哪。
+            // 实测案例：g-003 等 g-008、g-008 等 g-006，而 g-006 停在评审中 ⇒ 三个任务全堵，
+            // 而上游被反复重试 72 次（每次都被门禁挡回）。有了这个字段，「该先处理谁」一眼可见。
+            let gatekeepers = [];
             try {
-              const anyBlockingLink = listLinks(root).some((l) => l.kind === "start" || l.kind === "end");
-              if (anyBlockingLink) linkBlocked = linkBlockedGoals(root);
+              const blocking = listLinks(root).filter((l) => l.kind === "start" || l.kind === "end");
+              if (blocking.length > 0) {
+                linkBlocked = linkBlockedGoals(root);
+                const waitCount = new Map();
+                for (const b of linkBlocked) for (const w of b.waiting_for ?? []) waitCount.set(w, (waitCount.get(w) ?? 0) + 1);
+                gatekeepers = [...waitCount.entries()]
+                  .map(([goal, waiting]) => {
+                    let title = "", status = "";
+                    try { const m = loadGoal(findGoalFile(root, goal)).meta; title = String(m.title ?? ""); status = String(m.status ?? ""); } catch { /* 目标可能已归档 */ }
+                    return { goal, title, status, waiting };
+                  })
+                  .filter((x) => x.waiting > 0)
+                  .sort((a, b) => b.waiting - a.waiting);
+              }
             } catch { /* 门禁可见性失败不阻断 state 端点 */ }
             json(res, 200, {
               ok: true,
@@ -5508,6 +5537,10 @@ export function apply(ctx, config) {
               archived: listArchived(root),
               delivered: listDelivered(root),
               link_blocked: linkBlocked,
+              gatekeepers,
+              gatekeeper_hint: gatekeepers.length
+                ? `链路瓶颈：${gatekeepers[0].goal}（${gatekeepers[0].title || "—"}，当前 ${gatekeepers[0].status || "未知"}）挡住 ${gatekeepers[0].waiting} 个下游任务 —— 先推进它，整条链路才会动`
+                : null,
             });
           } catch (e) { json(res, e instanceof GraphError ? 400 : 500, { error: String(e?.message ?? e) }); }
         },

@@ -2236,6 +2236,73 @@ export function reapStaleAttempts(
 }
 
 // ---------------------------------------------------------------------------
+// [v0.31] 泳道健康诊断：把「反复派发却没成功」这类隐性卡点变成可见数据
+// 实测背景：多个目标被反复派发 13~18 次而无成功记录，但事件流里没有任何「卡在哪一环」的
+// 直接信号——排障只能人工翻日志。这里按目标聚合 attempt 成败/重试次数/当前卡点原因。
+// ---------------------------------------------------------------------------
+export interface GoalHealth {
+  goal: string;
+  title: string;
+  status: string;
+  lane: string;
+  attempts: number;
+  pending: number;
+  succeeded: number;
+  failed: number;
+  /** 反复派发但无成功：attempts >= 3 且没有成功的 */
+  churning: boolean;
+  /** 当前卡点（人类可读）：判据未确认 / 陈旧的进行中 attempt / 连线门禁 / 状态未就绪 */
+  stuck: string | null;
+}
+
+export function laneHealth(root: string, lane?: string | null): GoalHealth[] {
+  const links = readLinksFile(root);
+  const out: GoalHealth[] = [];
+  for (const f of listGoalFiles(root)) {
+    let meta: any = null;
+    try { meta = loadGoal(f).meta; } catch { continue; }
+    const v = meta?.version;
+    const laneKey = v === undefined ? "backlog" : v === null ? "standalone" : String(v);
+    if (lane && laneKey !== lane) continue;
+    const attDir = join(dirname(f), "attempts");
+    let attempts = 0, pending = 0, succeeded = 0, failed = 0;
+    if (existsSync(attDir)) {
+      for (const a of readdirSync(attDir)) {
+        const af = join(attDir, a, "attempt.md");
+        if (!existsSync(af)) continue;
+        attempts++;
+        try {
+          const r = String(loadGoal(af).meta?.result ?? "");
+          if (r === "pending") pending++;
+          else if (r === "succeeded" || r === "success" || r === "done") succeeded++;
+          else if (r) failed++;
+        } catch { /* 半成品跳过 */ }
+      }
+    }
+    const status = String(meta?.status ?? "");
+    let stuck: string | null = null;
+    if (pending > 0) stuck = "有进行中 attempt（若子代理已消失会被自愈收尾）";
+    else if (attempts > 0 && succeeded === 0 && (status === "planning" || status === "in_progress")) {
+      const unmet = unmetCriteria(root, String(meta.id));
+      if (unmet.length) stuck = `质量判据未确认（${unmet.length} 条待确认）`;
+      else {
+        const gate = linkGates(root, String(meta.id));
+        const gateBlocked = gate.blockedBy.length > 0;
+        stuck = gateBlocked ? `连线门禁：等待前置 ${gate.blockedBy.map((x) => x.from).join("、")} 交付` : null;
+      }
+    }
+    out.push({
+      goal: String(meta.id ?? ""), title: String(meta.title ?? ""), status, lane: laneKey,
+      attempts, pending, succeeded, failed,
+      churning: attempts >= 3 && succeeded === 0,
+      stuck,
+    });
+  }
+  // 先给「反复空转」与「有卡点」的目标，便于一眼看到问题
+  return out.sort((a, b) => Number(b.churning) - Number(a.churning) || b.attempts - a.attempts);
+}
+
+// ---------------------------------------------------------------------------
 // [v0.19] 泳道职责提示词：告知执行子代理「这条泳道大概是干什么的」（后端 / 部署测试 / 交互 …）
 // ---------------------------------------------------------------------------
 export function setLanePrompt(

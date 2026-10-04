@@ -399,6 +399,34 @@ function AutopilotPanel(props) {
       ),
       apHint("🌐 全局托管：勾选后自动扫描/采纳/起跑并处理阻塞，持续不停、永不自动停；取消勾选即回到手动操作。"),
       apHint("🌐 目标推进：勾选后不加新任务，只把非草稿任务全部推进到交付；取消勾选即恢复常规托管行为。"),
+      // [v0.31] 链路瓶颈：把「整条链路堵在谁身上」直接写在最显眼处。
+      // 实测背景：g-003 等 g-008、g-008 等 g-006，而 g-006 停在评审中 ⇒ 三个任务全堵，
+      // 上游被反复重试 72 次。用户此前无从得知「该先处理谁」——这条提示解决它。
+      (st?.gatekeepers ?? []).length > 0 && h("div", {
+        style: {
+          display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+          padding: "4px 8px", borderRadius: 6,
+          background: "rgba(224,90,90,.14)", border: "1px solid rgba(224,90,90,.5)",
+        },
+      },
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+        h("b", { style: { color: "#e05a5a" } }, "⛔ 链路瓶颈"),
+        h("span", null, st.gatekeeper_hint),
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
+        h("button", {
+          style: { ...btn, fontSize: 11, padding: "1px 6px" },
+          title: "把该瓶颈任务直接拖到「执行」列或点它所在泳道的 ▶ 即可推进",
+          onClick: () => {
+            const g = (st.gatekeepers ?? [])[0];
+            if (!g?.goal) return;
+            const el = document.getElementById("goal-" + g.goal) || document.querySelector(`[data-goal-id="${g.goal}"]`);
+            if (el) { el.scrollIntoView({ block: "center", behavior: "smooth" }); el.style.outline = "2px solid #e05a5a"; setTimeout(() => { el.style.outline = ""; }, 2500); }
+            else setMsg("该瓶颈任务不在当前视图（可能在其它泳道或已归档）");
+          },
+        }, "定位该任务"),
+        // i18n-keep(category-a)：瓶颈计数提示（中文），与上方同段。
+        (st.gatekeepers ?? []).length > 1 && h("span", { style: { opacity: 0.75, fontSize: 11 } }, `（另有 ${st.gatekeepers.length - 1} 个瓶颈）`),
+      ),
     ),
     // —— 推荐行（标准卡片，可拖进泳道）—— [v0.28] 问题20修复：折叠只隐藏**推荐卡片网格**，
     // 标题行 + 全部操作按钮（含输入框）保持常显；折叠态标题显示「💡 推荐（已收起）· N 条」。
