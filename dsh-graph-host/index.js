@@ -59,6 +59,8 @@ import {
   formatStandingMemorySection,
   requestAcceptReview,
   resolveAccept,
+  // [v0.36] 推前置时需要按目标找它属于哪条泳道（属于 ops，不是 autopilot）
+  listGoalFiles,
   archiveGoal,
   unarchiveGoal,
   deleteGoal,
@@ -6103,12 +6105,46 @@ export function apply(ctx, config) {
               // （起了也会立刻 finish 结束 → 每分钟空转；实测 35 次/200 条事件）。
               // 保留意图，等前置交付后自然恢复——「不空转、也不遗忘」。
               let gatedOut = false;
+              let waitForLanes = [];
               try {
+                // 直接问「这条泳道里还有谁被门禁挡着」——用 linkBlockedGoals（权威判定，覆盖
+                // planning/review 等所有状态），而不是 laneReadiness 的 link_blocked（只标 in_progress）。
                 const plan = laneReadiness(r, intent.version, { isLive: (cid) => childLiveState(cid) !== "gone" });
-                if (plan.runnable.length === 0 && (plan.link_blocked ?? []).length > 0) gatedOut = true;
+                const laneGoalIds = plan.goals.map((g) => g.id);
+                const blockedNow = linkBlockedGoals(r, laneGoalIds);
+                if (plan.runnable.length === 0 && blockedNow.length > 0) {
+                  gatedOut = true;
+                  // 被等待的前置（可能在别的泳道）——若那条泳道没在跑且它有可派发目标，就去把它推起来。
+                  waitForLanes = [...new Set(blockedNow.flatMap((x) => x.waiting_for))];
+                }
               } catch { /* 判定失败则按原逻辑尝试恢复 */ }
               if (gatedOut) {
-                // 静默等待（不写事件、不日志）——门禁每轮都会重新评估，前置一交付就自动继续
+                // [v0.35.1] 「不空转、也不干等」：已被门禁挡住 ⇒ 本项目不起重（避免每分钟空转）；
+                // 但要**主动去推前置**：把等待中的前置目标所在泳道的可派发队列找出来，能起就起。
+                // 这才是「无论出现什么都要自行推动、不能停滞」。
+                try {
+                  const lookupLane = new Map(); // goalId → lane
+                  for (const f of listGoalFiles(r)) {
+                    try {
+                      const m = loadGoal(f).meta;
+                      const v = m?.version;
+                      lookupLane.set(String(m?.id ?? ""), v === undefined ? "backlog" : v === null ? "standalone" : String(v));
+                    } catch { /* 跳过 */ }
+                  }
+                  const candidateLanes = [...new Set(waitForLanes.map((g) => lookupLane.get(g)).filter((l) => l && l !== "backlog"))];
+                  for (const ln of candidateLanes) {
+                    if (autopilotRunners.get(r)) break;            // 一次只起一条
+                    if (ln === intent.version) continue;           // 就是自己这条，跳过
+                    try {
+                      const p2 = laneReadiness(r, ln, { isLive: (cid) => childLiveState(cid) !== "gone" });
+                      if (p2.runnable.length > 0) {
+                        const started = autopilotStart(r, ln, intent.reviewMode, "system:autopilot");
+                        appendEvent(r, { actor: "system:autopilot", event: "autopilot.prerequisite_lane_started", details: { blocked_lane: intent.version, prerequisite_lane: ln, waiting_for: waitForLanes, queue: (started?.queue ?? []).length } });
+                        autopilotLog(`泳道 ${intent.version} 被门禁挡住 → 主动起跑前置泳道 ${ln}（推动链路）`);
+                      }
+                    } catch { /* 该泳道起不来就跳过 */ }
+                  }
+                } catch { /* 推前置失败不影响后续轮次 */ }
               } else {
               try {
                 const resumed = autopilotStart(r, intent.version, intent.reviewMode, "system:autopilot");
