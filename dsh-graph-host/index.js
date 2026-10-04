@@ -6107,15 +6107,23 @@ export function apply(ctx, config) {
               let gatedOut = false;
               let waitForLanes = [];
               try {
-                // 直接问「这条泳道里还有谁被门禁挡着」——用 linkBlockedGoals（权威判定，覆盖
-                // planning/review 等所有状态），而不是 laneReadiness 的 link_blocked（只标 in_progress）。
+                // [v0.36] 与派发时的门禁**同一判定**（linkGateReport，逐目标）：只要这条泳道的
+                // 可派发目标**全部**被门禁挡着，就别起重（起了也会立刻 finish → 空转）。
+                // 此前用 `plan.runnable.length === 0` 是错的：卡住的 g-003 是 planning 状态，它**在**
+                // runnable 里（门禁判定发生在派发时，不在 readiness）⇒ 条件永不成立，恢复分支照常起跑。
                 const plan = laneReadiness(r, intent.version, { isLive: (cid) => childLiveState(cid) !== "gone" });
-                const laneGoalIds = plan.goals.map((g) => g.id);
-                const blockedNow = linkBlockedGoals(r, laneGoalIds);
-                if (plan.runnable.length === 0 && blockedNow.length > 0) {
-                  gatedOut = true;
-                  // 被等待的前置（可能在别的泳道）——若那条泳道没在跑且它有可派发目标，就去把它推起来。
-                  waitForLanes = [...new Set(blockedNow.flatMap((x) => x.waiting_for))];
+                const cands = [...plan.runnable];
+                if (cands.length > 0) {
+                  const blockedCands = cands.filter((id) => {
+                    try { return linkGateReport(r, id, {}).blocked === true; } catch { return false; }
+                  });
+                  if (blockedCands.length === cands.length) {
+                    gatedOut = true;
+                    try {
+                      const rep = linkGateReport(r, cands[0], {});
+                      waitForLanes = [...new Set((rep.unsatisfied ?? []).map((c) => c.from))];
+                    } catch { waitForLanes = []; }
+                  }
                 }
               } catch { /* 判定失败则按原逻辑尝试恢复 */ }
               if (gatedOut) {
