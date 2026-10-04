@@ -25,7 +25,7 @@
 
 本插件采用**一体化单包分发**（npm 包名 `dsh-graph`），同时集成两大核心能力：
 
-- **Host 端**：向 DSH Agent 提供覆盖目标全生命周期的 49 个 `graph_*` 工具，并暴露 `/api/dsh-graph*` REST API（支持看板投影、目标详情查询与写操作）；
+- **Host 端**：向 DSH Agent 提供覆盖目标全生命周期的 52 个 `graph_*` 工具，并暴露 `/api/dsh-graph*` REST API（支持看板投影、目标详情查询与写操作）；
 - **Client 端**：无缝内嵌于 DSH Web 控制台（`conversation.view` 槽位）的浏览器二维泳道看板，提供直观的可视化交互与实时追踪。
 
 数据以本地纯文本与事件流形式存储于工作区的 `.dsh-graph/` 目录，Git 友好、天然支持协同对账与审计追踪。
@@ -85,7 +85,7 @@ dsh plugin --profile <profile-name> add dsh-graph
 
 ### Agent 工具速查表
 
-dsh-graph 为 Agent 提供了完善的工具链（共 49 个 `graph_*` 工具），按功能划分为以下分类：
+dsh-graph 为 Agent 提供了完善的工具链（共 52 个 `graph_*` 工具），按功能划分为以下分类：
 
 | 分类 | 工具名称 | 核心说明 |
 |------|----------|----------|
@@ -135,7 +135,10 @@ dsh-graph 为 Agent 提供了完善的工具链（共 49 个 `graph_*` 工具）
 | | `graph_refresh_results` | 重写 `results.md`：零 LLM 兜底拼装，或采用专用摘要子代理/人工产出的 `content`（旧版自动归档；支持批量 goals[]） |
 | | `graph_handoff` | 生成跨会话交接文档 `HANDOFF.md` |
 | | `graph_claim_supervisor` | 新会话接管 Supervisor 并更新会话元数据 |
-| | `graph_help` | 输出插件功能说明与 49 个工具速查清单 |
+| **自驾 / 协作 / 全控** | `graph_ap_control` | 主对话控制看板一切（19 个 action：泳道提示词/回收站/协作/推荐/全局/评审/管理员/目录/状态） |
+| | `graph_collab_post` | 在任务协作频道发消息并声明资源（冲突会被拒绝） |
+| | `graph_collab_read` | 读取协作频道消息与当前资源占用 |
+| | `graph_help` | 输出插件功能说明与 52 个工具速查清单 |
 | **数据与校验** | `graph_validate` | 执行全量不变式检查（状态、依赖环、卡片引用） |
 | | `graph_rebuild` | 从事件流完全重建目标状态并与元数据对账 |
 
@@ -189,7 +192,7 @@ dsh-graph 为 Agent 提供了完善的工具链（共 49 个 `graph_*` 工具）
 
 Distributed as a **single unified package** (npm package name: `dsh-graph`), it provides both halves out-of-the-box:
 
-- **Host Side**: Exposes 49 `graph_*` tools to DSH Agents covering the entire goal lifecycle, along with `/api/dsh-graph*` REST endpoints for board projections, goal details, and mutations;
+- **Host Side**: Exposes 52 `graph_*` tools to DSH Agents covering the entire goal lifecycle, along with `/api/dsh-graph*` REST endpoints for board projections, goal details, and mutations;
 - **Client Side**: A browser 2D swimlane kanban board integrated into DSH Web (the `conversation.view` slot) for intuitive visualization and real-time tracking.
 
 All data is stored locally as human-readable files and an append-only event log under `.dsh-graph/`, making it Git-friendly, easily auditable, and collaborative.
@@ -299,7 +302,10 @@ dsh-graph equips Agents with a comprehensive set of `graph_*` tools (49 in total
 | | `graph_refresh_results` | Regenerate `results.md`: zero-LLM fallback assembly, or a caller-supplied `content` body from the dedicated summarizer subagent / a human (previous version archived; supports a goals[] batch) |
 | | `graph_handoff` | Export cross-session handover document (`HANDOFF.md`) |
 | | `graph_claim_supervisor` | Claim supervisor role in new session & update metadata |
-| | `graph_help` | Display usage instructions and the 49-tool checklist |
+| **Autopilot / Collab / Control** | `graph_ap_control` | Drive the whole board from the main conversation (lane prompts, trash, collab, recommendations, globals, review mode, steward, catalog, links, settings, status) |
+| | `graph_collab_post` | Post to the task collaboration channel and claim resources (conflicting claims are rejected) |
+| | `graph_collab_read` | Read collaboration messages and active resource claims |
+| | `graph_help` | Display usage instructions and the 52-tool checklist |
 | **Validation** | `graph_validate` | Validate full invariants (states, cycles, card refs) |
 | | `graph_rebuild` | Rebuild goal state from `events.jsonl` and reconcile |
 

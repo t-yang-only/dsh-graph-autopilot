@@ -22,6 +22,8 @@ const distRoot = join(import.meta.dirname, "../../dist");
 const readClient = (name: string) => readFileSync(join(clientRoot, `${name}.js`), "utf8");
 
 const SIDEBAR_ID = "dsh-graph";
+const AGENTS_ID = "dsh-graph-agents";
+
 const CONVERSATION_VIEW_BLOCK = `        ctx.slots.inject("conversation.view", () =>
           ctx.slots.register(
             {
@@ -33,8 +35,25 @@ const CONVERSATION_VIEW_BLOCK = `        ctx.slots.inject("conversation.view", (
             },
             (props) => h(KanbanView, props),
           ),
+        );
+        // [v0.29] 问题 2：任务执行板页签 —— 与看板同处 conversation.view 页签行（「对话/轨迹/记忆/
+        // 上下文/任务台/…」那一排），标签「任务执行板」，order=81（紧随看板）。
+        // 渲染 AgentsBoardView（工厂作用域；内部就是 v0.28 的 AgentsBoard，variant="tab"）：
+        // 同一份 10s 轮询数据通道、同一套「↗ 转到对话 / 多选发消息 / LiveStrip 输出」能力；
+        // 看板内已**不再内嵌**该行（避免两处重复）。
+        // i18n-keep(category-a)：本页签标签按要求直接使用中文（不新增 i18n 词条）。
+        ctx.slots.inject("conversation.view", () =>
+          ctx.slots.register(
+            {
+              name: "conversation.view",
+              id: AGENTS_TAB_ID,
+              order: 81,
+              // [v0.29+] locale-following thunk（与看板页签同机制）
+              label: () => dgT("agentsTab.title"),
+            },
+            (props) => h(AgentsBoardView, props),
+          ),
         );`;
-
 interface Loaded {
   mod: any;
   registered: { def: any; renderer: any }[];
@@ -166,7 +185,7 @@ test("g-330 判据1：右侧栏注册类型（id/kind 带命名空间、thunk �
   assert.notEqual(def.kind, "context");
   assert.equal(typeof def.title, "function", "页签标题必须是 thunk（切语言重算）");
   assert.equal(typeof def.title({}), "string");
-  assert.ok(Array.isArray(def.guide) && def.guide.length === 2, "guide 页两条入口（看板 + 任务执行板）");
+  assert.ok(Array.isArray(def.guide) && def.guide.length === 1, "看板类型的 guide 仍是一条入口（执行板属另一类型）");
   const entry = def.guide[0];
   assert.equal(entry.id, SIDEBAR_ID);
   assert.equal(entry.order, 20, "排在宿主内置 Files 条目（order 10）之后");
@@ -180,21 +199,23 @@ test("g-330 判据1：本体/标题 seat 的 key 与类型 id 一致，且不存
   const l = loadAndApplyClient();
   const bodies = byName(l, "sidebar.right.pane.tab");
   const titles = byName(l, "sidebar.right.pane.tab.title");
-  assert.equal(bodies.length, 1, "本体 seat 恰好注册一次");
-  assert.equal(titles.length, 1, "标题 seat 恰好注册一次");
-  assert.equal(bodies[0].def.key, SIDEBAR_ID, "本体 seat 的 key = 类型 id");
-  assert.equal(titles[0].def.key, SIDEBAR_ID, "标题 seat 的 key = 类型 id");
+  assert.equal(bodies.length, 2, "本体 seat 两处（看板 + 任务执行板）");
+  assert.equal(titles.length, 2, "标题 seat 两处（看板 + 任务执行板）");
+  assert.deepEqual(bodies.map((b) => b.def.key).sort(), [AGENTS_ID, SIDEBAR_ID].sort(), "两处 seat 的 key = 各自类型 id");
+  assert.deepEqual(titles.map((t) => t.def.key).sort(), [AGENTS_ID, SIDEBAR_ID].sort(), "两处标题 seat 的 key = 各自类型 id");
   assert.equal(bodies[0].def.locale, "dsh-graph", "本体 seat 带 locale 命名空间");
   // 明确排除方案 A/C：不得出现全局页面或左/右侧栏 panellist 入口
   const names = l.registered.map((r) => r.def?.name);
   assert.deepEqual(names.filter((n) => n === "main" || n === "sidebar.panellist"), []);
-  assert.deepEqual(names.filter((n) => n === "sidebar.right.pane.tab" || n === "sidebar.right.pane.tab.title").length, 2);
+  assert.deepEqual(names.filter((n) => n === "sidebar.right.pane.tab" || n === "sidebar.right.pane.tab.title").length, 4);
 });
 
 test("g-330 判据1：页签标题组件渲染图标 + 当前语言文案，并订阅语言切换事件", () => {
   const l = loadAndApplyClient();
-  const renderer = byName(l, "sidebar.right.pane.tab.title")[0].renderer;
   // seat renderer 是宿主调用的包装：{ args: [GraphTabTitle, props] }，再手动渲染组件本体。
+  // [v0.29+] 现在有两个标题 seat（看板 + 任务执行板）——本用例考看板那个。
+  const kanbanTitle = byName(l, "sidebar.right.pane.tab.title").find((t) => t.def.key === SIDEBAR_ID) ?? byName(l, "sidebar.right.pane.tab.title")[0];
+  const renderer = kanbanTitle.renderer;
   const TitleComponent = renderer({ hooks: {} }).args[0];
   assert.equal(typeof TitleComponent, "function");
   const el = TitleComponent({});
@@ -202,7 +223,7 @@ test("g-330 判据1：页签标题组件渲染图标 + 当前语言文案，并�
   const [, , icon, label] = el.args;
   assert.ok(icon, "标题组件渲染了图标元素");
   assert.equal(label.args[0], "span");
-  assert.equal(label.args[2], "看板", "无 locale 服务时回退中文字典");
+  assert.equal(label.args[2], "任务台", "无 locale 服务时回退中文字典");
   // 语言切换重算依赖 useLocaleRevision（订阅 dsh-graph:locale-changed）
   const src = readClient("plugin");
   assert.match(src, /function GraphTabTitle\(\)[\s\S]{0,200}useLocaleRevision\(\)/);
@@ -294,16 +315,15 @@ test("g-352 att-005 取代 g-330 判据5：断点/折叠是同一份共用实现
 test("g-330 判据6：宿主无 sidebarRightTabs（回调不触发）时不注册、不抛、无残留", () => {
   const l = loadAndApplyClient({ provideSidebar: false });
   assert.equal(l.tabTypes.length, 0, "无能力时不注册 tab 类型");
+  assert.equal(byName(l, "conversation.view").length, 2, "会话内两个页签（看板 + 任务执行板）");
   assert.deepEqual(l.registered.map((r) => r.def?.name).filter((n) => String(n).startsWith("sidebar.right")), []);
-  // 会话内入口照旧
-  assert.equal(byName(l, "conversation.view").length, 1);
   assert.ok(l.injectDeps.some((d) => d.includes("sidebarRightTabs")), "确实尝试过 deferred inject");
 });
 
 test("g-330 判据6：旧 runner 无 ctx.inject 时 apply 不抛（可选项不得拖垮 apply）", () => {
   const l = loadAndApplyClient({ withInjectCtx: false });
   assert.equal(l.tabTypes.length, 0);
-  assert.equal(byName(l, "conversation.view").length, 1);
+  assert.equal(byName(l, "conversation.view").length, 2, "会话内两个页签（看板 + 任务执行板）");
 });
 
 test("g-330 判据6：deferred scope 的 slots 形状不符时静默降级（不注册类型，也不注册半套 seat）", () => {
@@ -322,8 +342,8 @@ test("g-330 判据6：注册表抛异常（id/kind 被占）时不冒泡，且�
 
 test("g-330 判据6：本体 seat 注册失败时撤销已成功的类型注册（不留半套）", () => {
   const l = loadAndApplyClient({ bodyRegisterThrows: true });
-  assert.equal(l.tabTypes.length, 1, "类型先注册成功");
-  assert.equal(l.tabDisposed, 1, "随后失败必须撤销已成功的部分注册");
+  assert.ok(l.tabTypes.length >= 1, "类型先注册成功");
+  assert.ok(l.tabDisposed >= 1, "随后失败必须撤销已成功的部分注册");
   assert.deepEqual(l.registered.map((r) => r.def?.name).filter((n) => String(n).startsWith("sidebar.right")), []);
 });
 

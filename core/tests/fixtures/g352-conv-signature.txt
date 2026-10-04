@@ -1,15 +1,16 @@
 # g352-conv-signature —— 会话内看板页签元素签名冻结基线（v0.17.0 开发线重新冻结：g-367 给窄档搜索聚合泳道加分区组头，250px 非搜索页签的渲染契约逐字未变 ⇒ content-sha 未变，仅 source-sha256 头随 kanban.js 变更；本次为 PLUGIN_VERSION 0.17.0-alpha→0.17.0 版本串刷新，正文与 content-sha256 同样逐字节未变）
-# source-commit: 6d5500ac16af314cb6557f6f15301f84f2ad78e5
-# source-sha256: 2bf46cbd5404d23bf260d0ae62a4007659a741546b753799b3788e4cc21d5b2e
+# source-commit: de7ff2dcca4f7bc32e665eb63f789e6b789997ac
+# source-sha256: 0101e5a5fa0a218a5136259925b95dd05506730b35290ba4ea5bd8a4acf816d0
 # source-files: kanban,constants,narrow-width,helpers   # 源 hash 覆盖的模块（决定头部/泳道渲染）
-# content-sha256: 0e6b7094deafa61e0525d617f792a8da30b9aeba1a3c72cb221ee4061f783ed3
+# content-sha256: 5ad995097616a04dc361d0c77b82d5b47cda88dca940bb4aa79f42268e51037f
 # board-width: 250
 div key=kanban-0 class=dg-kanban-root style=color=inherit;fontSize=13;minWidth=0;overflowX=auto;padding=12;position=relative;zIndex=1 flags=-
   style key=- class=- style=- flags=-
+  style key=- class=- style=- flags=-
   div key=- class=dg-head style=alignItems=center;display=flex;gap=12;marginBottom=8 flags=-
-    strong key=- class=- style=flexShrink=0;whiteSpace=nowrap flags=-
-    a key=- class=- style=color=var(--dsw-alias-state-business-primary, #8ab4ff);cursor=pointer;flexShrink=0;fontSize=12;opacity=0.65;textDecoration=underline;whiteSpace=nowrap flags=title,href
-    RefreshCountdown key=- class=- style=- flags=-
+    a key=- class=- style=color=var(--dsw-alias-state-business-primary, #8ab4ff);cursor=pointer;flexShrink=0;fontSize=12;fontWeight=700;opacity=0.65;textDecoration=underline;whiteSpace=nowrap flags=title,href
+    span key=- class=dg-version-hidden style=display=none flags=-
+      RefreshCountdown key=- class=- style=- flags=-
     span key=tb-overflow class=- style=display=inline-flex;flex=1 1 auto;justifyContent=flex-end;minWidth=0;position=relative;verticalAlign=middle flags=-
       button key=- class=dg-btn dg-narrow-head-btn dg-head-overflow-trigger style=alignItems=center;background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;boxSizing=border-box;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;display=inline-flex;fontSize=12;gap=4;height=26;justifyContent=center;lineHeight=22px;marginLeft=8;maxWidth=100%;minWidth=0;overflow=hidden;padding=0 8px;textOverflow=ellipsis;verticalAlign=middle;whiteSpace=nowrap flags=title,aria-label,aria-expanded
     div key=- class=dg-search-bar style=alignItems=center;display=flex;flexShrink=0;gap=6;marginLeft=auto;minWidth=0 flags=-
@@ -21,23 +22,28 @@ div key=kanban-0 class=dg-kanban-root style=color=inherit;fontSize=13;minWidth=0
     div key=grid-corner class=dg-grid-corner style=alignItems=center;display=flex;flexDirection=row;flexWrap=nowrap;fontWeight=600;gap=4;justifyContent=flex-start;maxWidth=100%;minWidth=0;opacity=0.75;overflow=hidden;padding=4px 2px;textAlign=center;whiteSpace=nowrap flags=-
       button key=- class=dg-btn dg-version-manage-btn style=alignItems=center;background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;boxSizing=border-box;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;display=inline-flex;flex=0 0 auto;fontSize=12;gap=4;height=26;justifyContent=center;lineHeight=22px;minWidth=26;padding=0;verticalAlign=middle;width=26 flags=title,aria-label
       button key=- class=dg-btn style=alignItems=center;background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;boxSizing=border-box;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;display=inline-flex;fontSize=12;gap=4;height=26;justifyContent=center;lineHeight=22px;maxWidth=100%;minWidth=0;overflow=hidden;padding=0 8px;textOverflow=ellipsis;verticalAlign=middle flags=title
+      button key=- class=dg-btn dg-create-group-btn style=alignItems=center;background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;boxSizing=border-box;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;display=inline-flex;flexShrink=1;fontSize=12;gap=4;height=26;justifyContent=center;lineHeight=22px;maxWidth=100%;minWidth=0;overflow=hidden;padding=0 8px;textOverflow=ellipsis;verticalAlign=middle flags=title,aria-label
     div key=v-v1-label class=dg-version-label style=background=rgba(255,255,255,.03);borderTop=1px solid rgba(128,128,128,.35);cursor=pointer;fontWeight=600;padding=8px 6px;paddingRight=136;position=relative flags=title
       span key=vp-lane class=- style=display=inline-block;maxWidth=110;minWidth=0;position=absolute;right=40;top=8;zIndex=5 flags=-
         button key=- class=dg-btn dg-narrow-head-btn dg-version-picker-trigger style=alignItems=center;background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;boxSizing=border-box;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;display=inline-flex;fontSize=12;gap=4;height=26;justifyContent=center;lineHeight=22px;marginLeft=8;maxWidth=110;minWidth=0;overflow=hidden;padding=0 8px;textOverflow=ellipsis;verticalAlign=middle;whiteSpace=nowrap flags=title,aria-label,aria-expanded
+      LaneRunButton key=run-v1 class=- style=- flags=-
       button key=- class=dg-btn style=alignItems=center;background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;bottom=auto;boxSizing=border-box;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;display=inline-flex;fontSize=12;gap=4;height=26;justifyContent=center;lineHeight=22px;minWidth=26;padding=0;position=absolute;right=6;top=8;verticalAlign=middle;width=26 flags=title
     div key=v-v1-vstack class=- style=display=flex;flexDirection=column;gap=8;gridColumn=1 / -1;minWidth=0 flags=-
       div key=v-v1-v-describe class=- style=display=flex;flexDirection=column;gap=4;minWidth=0 flags=-
         div key=- class=- style=alignItems=center;display=flex;fontWeight=600;gap=6;justifyContent=space-between;opacity=0.8;padding=4px 6px 2px;textAlign=left;whiteSpace=nowrap flags=-
           span key=- class=- style=minWidth=0;overflow=hidden;textOverflow=ellipsis flags=-
         div key=v-v1-describe class= style=background=rgba(255,255,255,.03);borderTop=1px solid rgba(128,128,128,.35);minHeight=40;padding=4;verticalAlign=top flags=-
-          div key=g-001 class=dg-card style=background=rgba(128,128,128,.08);border=1px solid rgba(128,128,128,.45);borderLeft=5px solid #8a8a8a;borderRadius=6;cursor=pointer;marginBottom=6;padding=6px 8px flags=title
-            div key=- class=- style=lineHeight=1.5 flags=-
-              button key=- class=dg-chevron style=display=inline-block;marginRight=4;verticalAlign=middle flags=title
-              TypeBadgeWithSelector key=- class=- style=- flags=-
-              span key=- class=- style=display=inline;fontWeight=600;marginBottom=2;verticalAlign=middle flags=-
-            GoalTags key=- class=- style=- flags=-
-            div key=- class=- style=fontSize=12;opacity=0.65 flags=-
-              CriteriaProgress key=- class=- style=- flags=-
+          div key=g-001 class=dg-draft-wrap style=minWidth=0 flags=-
+            div key=g-001 class=dg-card style=background=rgba(128,128,128,.08);border=1px solid rgba(128,128,128,.45);borderLeft=5px solid #8a8a8a;borderRadius=6;cursor=pointer;marginBottom=6;padding=6px 8px flags=title
+              div key=- class=- style=lineHeight=1.5 flags=-
+                button key=- class=dg-chevron style=display=inline-block;marginRight=4;verticalAlign=middle flags=title
+                TypeBadgeWithSelector key=- class=- style=- flags=-
+                span key=- class=- style=display=inline;fontWeight=600;marginBottom=2;verticalAlign=middle flags=-
+              GoalTags key=- class=- style=- flags=-
+              div key=- class=- style=fontSize=12;opacity=0.65 flags=-
+                CriteriaProgress key=- class=- style=- flags=-
+            div key=draft-action class=dg-draft-action style=display=flex;justifyContent=flex-end;marginBottom=4;marginTop=2;minWidth=0 flags=-
+              button key=- class=dg-btn style=background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;fontSize=10;lineHeight=1.4;padding=1px 6px;whiteSpace=nowrap flags=title
       div key=v-v1-v-collect class=- style=display=flex;flexDirection=column;gap=4;minWidth=0 flags=-
         div key=- class=- style=alignItems=center;display=flex;fontWeight=600;gap=6;justifyContent=space-between;opacity=0.8;padding=4px 6px 2px;textAlign=left;whiteSpace=nowrap flags=-
           span key=- class=- style=minWidth=0;overflow=hidden;textOverflow=ellipsis flags=-
@@ -59,3 +65,7 @@ div key=kanban-0 class=dg-kanban-root style=color=inherit;fontSize=13;minWidth=0
         div key=- class=- style=alignItems=center;display=flex;fontWeight=600;gap=6;justifyContent=space-between;opacity=0.8;padding=4px 6px 2px;textAlign=left;whiteSpace=nowrap flags=-
           span key=- class=- style=minWidth=0;overflow=hidden;textOverflow=ellipsis flags=-
         div key=v-v1-blocked class= style=background=rgba(0,0,0,.03);borderTop=1px solid rgba(128,128,128,.35);minHeight=40;padding=4;verticalAlign=top flags=-
+    TemplateLane key=tpl-lane class=- style=- flags=-
+    TrashLane key=trash-lane class=- style=- flags=-
+  AutopilotPanel key=- class=- style=- flags=-
+  LinksLayer key=links-layer class=- style=- flags=-

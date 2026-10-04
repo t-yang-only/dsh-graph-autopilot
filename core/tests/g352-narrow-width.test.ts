@@ -1194,7 +1194,8 @@ test("g-352 att-005 判据5②（渲染级）：对话本体零新增差异（�
   assert.match(plugin, /inject: \["slots", "sessions"\]/, "硬 inject 不得新增（对话本体的依赖面不变）");
   const h = createRenderHarness({ boardWidth: 900, payload: { board: boardFixture(), backlogGoals: backlogGoalsFixture } });
   assert.deepEqual(Array.from(h.mod.inject), ["slots", "sessions"], "运行时 inject 仍是 [slots, sessions]");
-  assert.equal(h.registered.filter((r) => r.def?.name === "conversation.view").length, 1, "conversation.view 仍只有一个注册项（未新增宿主挂载点）");
+  // [v0.29+] 新增「任务执行板」页签 ⇒ conversation.view 两个注册项（未新增宿主挂载点）
+  assert.equal(h.registered.filter((r) => r.def?.name === "conversation.view").length, 2, "conversation.view 两个注册项（看板 + 任务执行板）");
   // 静态（无任何点击）渲染：自有根节点恰好一个，且就是看板根（不往对话本体里插别的节点）
   const r = await h.settle({ sessionId: "s1" });
   const els = r.passElements();
@@ -1696,7 +1697,8 @@ test("g-352 att-003 第5项（渲染级）：选项带版本图标、触发器�
   assert.equal(treeText(byKey.get("vp-v1")!), "✓ 🏷️ V1", "选中项保留勾选但不得替代版本图标");
   assert.equal(treeText(byKey.get("vp-v2")!), "🏷️ V2", "未选中项用与看板一致的版本图标");
   assert.equal(treeText(byKey.get("(all)")!), "▸ 全部版本", "「全部版本」出口保留");
-  assert.equal(treeText(byKey.get("vp-backlog")!), "📥 backlog");
+  // [v0.29] backlog 泳道显示名改为「草稿」
+  assert.equal(treeText(byKey.get("vp-backlog")!), "📥 草稿");
   assert.equal(treeText(byKey.get("vp-standalone")!), "📌 独立目标");
   assert.ok(!byKey.has("vp-v0"), "已发布版本仍不作为视图备选");
 
@@ -2018,7 +2020,8 @@ test("g-352 att-005 B1（结构级/两侧一致）：DEBUG 是 .dg-head 的直�
     const h = createRenderHarness({ boardWidth: width, payload: payload() });
     const els = (await h.settle(props)).passElements();
     const parents = parentIndexOf(els);
-    const strong = els.filter((e) => e.type === "strong" && treeText(e) === "dsh-graph").pop();
+    // [v0.29+] 标题改为 <a>（本身即私有仓跳转入口）
+    const strong = els.filter((e) => (e.type === "strong" || e.type === "a") && treeText(e) === "dsh-graph-autopilot").pop();
     assert.ok(strong, `${label}：看板标题存在`);
     const head = parents.get(strong);
     assert.ok(head, `${label}：标题在头部容器内`);
@@ -2136,7 +2139,8 @@ test("g-352 att-004 N1（渲染级）：标签筛选激活时头部「清除筛�
   const h = createRenderHarness({ boardWidth: 900, payload });
   /** 头部（.dg-head）子树内、文字匹配的按钮——弹窗里也有一个「清除筛选」，必须排除。 */
   const headBtn = (els: any[], text: string) => {
-    const strong = els.filter((e) => e.type === "strong" && treeText(e) === "dsh-graph").pop();
+    // [v0.29+] 标题改为 <a>（本身即私有仓跳转入口）
+    const strong = els.filter((e) => (e.type === "strong" || e.type === "a") && treeText(e) === "dsh-graph-autopilot").pop();
     assert.ok(strong, "看板标题存在");
     const head = parentIndexOf(els).get(strong);
     assert.ok(head, "标题在头部容器内");
@@ -2665,7 +2669,8 @@ const G367_MATCH_ORDER = ["g-101", "g-201", "g-203", "g-001", "g-301", "g-302", 
 /** 分组后的纵向次序：活跃版本 → 已发布版本 → 独立目标 → backlog → 已隐藏版本。 */
 const G367_GROUPED_ORDER = ["g-101", "g-201", "g-203", "g-001", "g-011", "g-900", "g-401", "g-301", "g-302"];
 const G367_GROUPS = ["v-v1", "v-v2", "rellane-v0", "rellane-vold", "standalone", "backlog", SEARCH_GROUP_HIDDEN];
-const G367_LABELS = ["V1（1）", "V2（2）", "V0（1）", "VOLD（1）", "独立目标（1）", "backlog（1）", "已隐藏版本（2）"];
+// [v0.29] backlog 泳道显示名改为「草稿」（i18n view.backlogLane）
+const G367_LABELS = ["V1（1）", "V2（2）", "V0（1）", "VOLD（1）", "独立目标（1）", "草稿（1）", "已隐藏版本（2）"];
 const G367_MISS_IDS = ["g-102", "g-202", "g-002", "g-501", "g-901", "g-402"];
 /** 隐藏版本底账：只藏 vhid（其两条命中仍必须出现在末尾「已隐藏版本」组里）。 */
 const g367Storage = () => ({ [G367_HIDDEN_KEY]: JSON.stringify(["vhid"]) });

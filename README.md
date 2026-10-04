@@ -15,7 +15,7 @@
   <a href="https://github.com/miuzel/dsh-graph/blob/main/dsh-graph-host/package.json"><img src="https://img.shields.io/badge/DSH-%3E%3D0.1.5--rc.2%20%3C0.2.1--0-2f6feb?style=flat-square" alt="DSH host range"></a>
 </p>
 
-**当前版本 v0.17.0** —— npm 包名 `dsh-graph`，一个包同时提供面向 Agent 的 49 个 `graph_*` 工具（含 `/api/dsh-graph*` REST 端点）与内嵌 DSH Web 的二维泳道看板。
+**当前版本 v0.17.0** —— npm 包名 `dsh-graph`，一个包同时提供面向 Agent 的 52 个 `graph_*` 工具（含 `/api/dsh-graph*` REST 端点）与内嵌 DSH Web 的二维泳道看板。
 
 **最新亮点（v0.17.0）**
 
@@ -56,7 +56,7 @@ dsh plugin --profile <name> add dsh-graph
 
 ## 提供的工具
 
-49 个 `graph_*` 工具，按功能分组（逐个说明见 [dsh-graph-host/README.md](dsh-graph-host/README.md) 或 `graph_help`）：
+52 个 `graph_*` 工具，按功能分组（逐个说明见 [dsh-graph-host/README.md](dsh-graph-host/README.md) 或 `graph_help`）：
 
 | 分组 | 工具 |
 |------|------|
@@ -74,6 +74,7 @@ dsh plugin --profile <name> add dsh-graph
 | 历史讨论 | `graph_add_comment` |
 | 完成摘要 | `graph_write_results` · `graph_refresh_results` |
 | 换会话 | `graph_handoff` · `graph_claim_supervisor` |
+| 自驾 / 协作 / 全控 | `graph_ap_control` · `graph_collab_post` · `graph_collab_read` |
 | 帮助 | `graph_help` |
 
 ## 看板（浏览器客户端）

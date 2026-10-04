@@ -283,7 +283,7 @@
         h("path", { d: "M8 13.4A5.4 5.4 0 0 1 2.6 8", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round", fill: "none", opacity: 0.5 }));
     }
     // chip 标题 seat：图标 + 文案（结构/间距与 GraphTabTitle 逐字同款，含 dockkit 的 30px 渐隐预留）。
-    // i18n-keep(category-a)：本页签文案按要求直接使用中文（不新增 i18n 词条；看板页签仍走 dgT）。
+    // [v0.29+] 文案走 i18n（agentsTab.title），中英各一条 —— 与看板页签同一套 locale 机制。
     function AgentsTabTitle() {
       // 切语言时重算（与 GraphTabTitle 同一订阅机制，保持两处行为一致）。
       useLocaleRevision();
@@ -291,7 +291,7 @@
         h(AgentsTabIcon, { size: 16 }),
         h("span", {
           style: { paddingRight: 30, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-        }, "任务执行板"));
+        }, dgT("agentsTab.title")));
     }
     return {
       name: "dsh-graph",
@@ -353,7 +353,8 @@
               name: "conversation.view",
               id: AGENTS_TAB_ID,
               order: 81,
-              label: () => "任务执行板",
+              // [v0.29+] locale-following thunk（与看板页签同机制）
+              label: () => dgT("agentsTab.title"),
             },
             (props) => h(AgentsBoardView, props),
           ),
@@ -452,13 +453,13 @@
               own(tabs.register({
                 id: AGENTS_TAB_ID,
                 kind: AGENTS_TAB_KIND,
-                // i18n-keep(category-a)：本页签文案为中文（thunk 形式保留，便于将来接 i18n 词条）
-                title: () => "任务执行板",
+                // [v0.29+] 与看板页签同一套 i18n 机制（thunk 按活跃语言重算）
+                title: () => dgT("agentsTab.title"),
                 guide: [{
                   id: AGENTS_TAB_ID,
                   order: AGENTS_GUIDE_ORDER,
-                  title: () => "任务执行板",
-                  description: () => "查看本工作区执行子代理：运行状态、模型/tokens、输出流与批量发消息",
+                  title: () => dgT("agentsTab.title"),
+                  description: () => dgT("agentsTab.guide"),
                   icon: AgentsTabIcon,
                 }],
               }));

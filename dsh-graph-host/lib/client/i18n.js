@@ -60,6 +60,9 @@
       // g-330：右侧栏页签入口（方案 B）——页签 chip 标题与侧栏 guide 条目文案
       'sidebar.tab.title': '任务台',
       'sidebar.guide.description': '在这个会话里查看和操作目标看板',
+      // [v0.29+] 任务执行板页签（conversation.view + 侧栏同款文案，中英各一条）
+      'agentsTab.title': '任务执行板',
+      'agentsTab.guide': '查看本工作区执行子代理：运行状态、模型/tokens、输出流与批量发消息',
       'kanban.loading': 'dsh-graph 看板加载中…',
       'kanban.error.workspace': '⚠️ 无法确定工作区，已暂停看板请求。',
       'kanban.error.fetch': '看板数据获取失败：',
@@ -1117,11 +1120,13 @@
       'stage.blocked': 'Blocked',
 
       // === Kanban top/loading ===
-      'board.title': 'Kanban',
+      'board.title': 'Task Board',
       'board.tab': 'Kanban',
       // g-330: right-sidebar tab entry (option B) — tab chip title and sidebar guide copy
-      'sidebar.tab.title': 'Kanban',
+      'sidebar.tab.title': 'Task Board',
       'sidebar.guide.description': 'View and manage the goal board in this session',
+      'agentsTab.title': 'Agent Board',
+      'agentsTab.guide': 'Inspect this workspace’s execution subagents: live state, model/tokens, output stream and batch messaging',
       'kanban.loading': 'dsh-graph board loading…',
       'kanban.error.workspace': '⚠️ Unable to determine workspace, board requests paused.',
       'kanban.error.fetch': 'Failed to fetch board data: ',

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 /** dsh-graph-host 单包（g-116 合并后）webServer 半边（/api/dsh-graph 写端点）冒烟测试：g-109。
  *  mock webServer/ctx，无 subagents 服务 → 验证降级路径（attempt 本地创建、child_error 上报、
  *  卡片不误翻 collecting）；有 body 的 POST 走 readBody + 事件先行断言。
@@ -329,7 +330,8 @@ test("g-164 released 泳道与 active/version 泳道共用同一动态列模板�
   // g-352 att-005（负责人显式授权改写本段布局契约断言）：两颗按钮回到网格左上角原位置后，
   // 该单元格抽成**单一变量** `gridCornerEl`（两侧/各档位共用同一份定义，不再有两处复制粘贴），
   // 故这里改为断言「网格首个 child 就是 gridCornerEl，且它由版本管理 + 创建版本两颗按钮组成」。
-  assert.match(source, /const gridCornerEl = h\("div", \{[\s\S]*?\}, versionManageBtn, createVersionBtn\);/);
+  // [v0.29] 角落新增第三颗「创建功能」按钮
+  assert.match(source, /const gridCornerEl = h\("div", \{[\s\S]*?\}, versionManageBtn, createVersionBtn, createGroupBtn\);/);
   assert.match(source, /h\("div", \{ style: \{ \.\.\.S\.grid, gridTemplateColumns: gridCols \} \},\s*\n\s*\/\/[\s\S]*?\n\s*gridCornerEl,/);
   assert.match(source, /\}, dgT\("createVersion\.createBtn"\)\);/);
   // released 泳道网格：(1) 处使用 gridCols（relx- 容器），保证与上方泳道列宽/顺序一致。
@@ -345,7 +347,8 @@ test("g-174 标题栏源契约：version 链接、新建版本入口迁移、设
   // 切片终点与下面三条断言逐字未变，标题栏契约的覆盖范围与强度不受影响。
   const head = source.slice(source.indexOf('h("div", { style: S.head'), source.indexOf("// g-108：顶部 supervisor 状态栏"));
   // 标题栏显示插件版本链接，新标签打开插件官网。
-  assert.match(head, /href: "https:\/\/github\.com\/miuzel\/dsh-graph",\s*\n\s*target: "_blank"/);
+  // [v0.19/v0.29] 跳转改指私有 fork 仓库的 autopilot 分支（标题即入口，新标签打开）
+  assert.match(head, /href: "https:\/\/github\.com\/t-yang-only\/dsh-graph-autopilot\/tree\/autopilot",\s*\n\s*target: "_blank"/);
   assert.match(head, /"version: " \+ PLUGIN_VERSION/);
   // 标题栏不再重复显示「＋ 新建版本」（已迁至看板左上角，见 g-164 契约断言）。
   assert.doesNotMatch(head, /"＋ 新建版本"/);
@@ -508,7 +511,8 @@ test("g-165 各类列空白区域拖拽目标与离列清除源契约", () => {
   const flatEnd = source.indexOf('return [labelEl, flatCell]', flatStart);
   const flat = source.slice(flatStart, flatEnd);
   assert.ok(flat.includes('className: "dg-backlog-lane"'));
-  assert.ok(flat.includes('onDragOver: drag ? (e) =>'));
+  // [v0.17.3+] 落点处理器改为无条件挂载（内部再判 drag），旧签名 'drag ? (e) =>' 已不存在
+  assert.ok(flat.includes('onDragOver: (e) =>'));
   assert.ok(flat.includes('if (!e.target?.closest?.(".dg-card"))'));
   assert.doesNotMatch(flat, /!goals\.length/);
   assert.ok(flat.includes('overStageKey: "describe", overLaneKey: key'));
@@ -2967,8 +2971,9 @@ test("g-189 REST fixture：标准 attempt worktree 可发现且 foreign 分支�
 
 // g-189：worktree 发现保持只读、canonical workspace 与路径安全边界。
 test("g-189 worktree 发现与弹窗展示源契约", () => {
-  const host = readFileSync(join(dirname(new URL(import.meta.url).pathname), "../../dist/index.js"), "utf8");
-  const modal = readFileSync(join(dirname(new URL(import.meta.url).pathname), "../../dsh-graph-host/lib/client/goal-modal.js"), "utf8");
+  // [v0.29] Windows 修复：file URL 的 pathname 形如 /C:/...，与盘符拼接会得到 C:\C:\...（ENOENT）
+  const host = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../dist/index.js"), "utf8");
+  const modal = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../dsh-graph-host/lib/client/goal-modal.js"), "utf8");
   assert.match(host, /git.*worktree.*list.*porcelain/);
   assert.match(host, /canonicalWorkspace/);
   assert.match(host, /relative\(canonical, actual\)/);
@@ -3930,9 +3935,10 @@ test("g-259 行为模拟：判据 1~4 全覆盖（成功生效、校验失败零
   {
     const h = createHarness({ initialInterval: 15, refreshIntervalInput: "2" });
     await h.harness.save();
-    assert.equal(h.store.get("dsh-graph.refresh-interval"), "5", "非法/小于 5s 自动纠偏为 5s");
-    assert.equal(h.events[0].detail?.interval, 5);
-    assert.equal(h.harness.getBaseline().refreshInterval, "5");
+    // [v0.29] 实时刷新：下限 5s → 1s，"2" 属合法值（保留 2，不再纠偏为 5）
+    assert.equal(h.store.get("dsh-graph.refresh-interval"), "2", "≥1s 的输入按原值保存（下限已放宽到 1s）");
+    assert.equal(h.events[0].detail?.interval, 2);
+    assert.equal(h.harness.getBaseline().refreshInterval, "2");
   }
 
   // 判据 3：前置校验拦截时零副作用——pk lanes 等非法值被拦截并提示错误、不发起 POST，localStorage 与广播事件均未触发

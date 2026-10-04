@@ -1,4 +1,4 @@
-dsh-graph 是把工作组织成「目标看板」的插件。可用 graph_* 工具（共 49 个）：
+dsh-graph 是把工作组织成「目标看板」的插件。可用 graph_* 工具（共 52 个）：
 
 ## 目标生命周期
 - graph_create_goal(title[, version][, type]) 建目标（进 backlog，带 version 则排期；type 可选 feature/bug/task/improvement/patch/chore）；
@@ -65,7 +65,12 @@ dsh-graph 是把工作组织成「目标看板」的插件。可用 graph_* 工�
 - graph_update_settings(patch) 更新项目配置（schema 校验、保留注释、原子写）。
 
 ## 帮助
-- graph_help() 显示本帮助（全部 49 个工具清单与参数速查）。
+- graph_ap_control(action,
+  [lane, text, goal, dir, version, picks, claims, from, to, id, kind, note, model, reasoning_effort, items,
+  reviewMode, managerPrompt, managerEnabled, managerIntervalMin, managerUpdateGlobals, confirm, workspace, settings]) 主对话控制看板一切：lane_prompt_get/set、trash_list/restore/purge/to_draft、collab_post/read、recs_scan/adopt、deep_scan、global_goal_set、global_prompt_set、review_mode_set、manager_get/set/run、catalog_list、status、links_list/add/remove、steward_set、advance_mode_set、settings_get/set；
+- graph_collab_post([text, claims, goal, kind, workspace]) 协作频道发消息并声明资源（与他人重叠会被拒绝）；
+- graph_collab_read([limit, workspace]) 读取协作频道消息与当前资源占用；
+- graph_help() 显示本帮助（全部 52 个工具清单与参数速查）。
 
 ## 接管 supervisor
 **仅在负责人明确要求你接管 supervisor 时执行**——默认任何会话都不得自动 claim：
