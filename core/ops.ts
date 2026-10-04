@@ -3548,13 +3548,14 @@ export function attachmentDigest(root: string, name: string): string | null {
  *  悬空引用与坏卡片跳过（由 validate 报告），不在此抛错。
  *  g-183：共享引用解析到共享池权威内容（各 goal 引用读同一份）；
  *  引用 id 经 assertSafeId 安全解析，恶意/越界 ref 被跳过（统一安全解析）。 */
-/** 将 graph 内部卡片路径转换为相对工作区根的精确路径（以 .dsh-graph/ 开头，供执行者按需读取）。 */
+/** 将 graph 内部卡片路径转换为相对工作区根的精确路径（以 .dsh-graph/ 开头，供执行者按需读取）。
+ *  [v0.29+] 契约要求该文本**始终以 `.dsh-graph/` 前缀、正斜杠分隔**：此前直接返回 `relative()` 的结果，
+ *  在 Windows 上得到 `.dsh-graph\...`，既违背文档的前缀约定，又让下面那句 startsWith 判定失效
+ *  （工作区根不在 `.dsh-graph` 名下时会拼出 `.dsh-graph\.dsh-graph\…` 双前缀）。 */
 export function toWorkspaceCardPath(root: string, cardFile: string): string {
-  if (basename(root) === ".dsh-graph") {
-    return relative(dirname(root), cardFile);
-  }
-  const rel = relative(root, cardFile);
-  return rel.startsWith(".dsh-graph/") ? rel : join(".dsh-graph", rel);
+  const base = basename(root) === ".dsh-graph" ? dirname(root) : root;
+  const norm = relative(base, cardFile).split(sep).join("/");
+  return norm.startsWith(".dsh-graph/") ? norm : ".dsh-graph/" + norm.replace(/^\.dsh-graph\//, "");
 }
 
 export function harvestedCards(root: string, goalId: string): HarvestedCard[] {
