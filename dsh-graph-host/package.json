@@ -1,6 +1,6 @@
 {
   "name": "dsh-graph",
-  "version": "0.34.0",
+  "version": "0.35.0",
   "description": "A DeepSeek Harness plugin for graph-based goal management and kanban visualization.",
   "license": "MIT",
   "type": "module",

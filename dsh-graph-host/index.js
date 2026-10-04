@@ -4821,7 +4821,15 @@ export function apply(ctx, config) {
       if (r.timer) clearTimeout(r.timer);
       if (r.poll) clearInterval(r.poll);
       autopilotRunners.delete(root);
-      clearRunnerIntent(root); // [v0.26] 清除运行意图（手动停止/跑完 → 不再自动恢复）
+      // [v0.35] **被门禁挡住不是「跑完」**：此时前置还没交付，等它交付后这条泳道应当自动继续。
+      // 此前无条件 clearRunnerIntent ⇒ 每轮 advance 重新起跑、立刻又撞门禁结束 ——
+      // 实测造成 35 次 lane_started/lane_blocked_by_links 空转且永远推不动（真 bug）。
+      // 只有「跑完 / 队列空 / 手动停止」才清意图；门禁阻塞保留，交由恢复机制在前置交付后接续。
+      if (reason === "link-gate-blocked") {
+        autopilotLog(`泳道 ${r.version} 被连线门禁挡住（保留运行意图，等前置交付后自动继续）`);
+      } else {
+        clearRunnerIntent(root);
+      }
       appendEvent(root, { actor: "system:autopilot", event: "autopilot.lane_finished", details: { version: r.version, reason, done: r.done, failed: r.failed } });
       autopilotLog(`泳道 ${r.version} 结束（${reason}）：完成 ${r.done.length}，失败 ${r.failed.length}`);
     }
