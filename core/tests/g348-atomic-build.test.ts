@@ -35,12 +35,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
+  closeSync,
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -291,6 +294,46 @@ interface RoundResult {
 }
 
 /**
+ * 本机是否具备「读者持有目录内文件句柄时仍可原子 rename 该目录」的语义。
+ *
+ * **这是判据 2 行为性断言的前置条件，不是测试的便利设施**：g-348 的原子发布（`mv -T --exchange`
+ * 或退化路径的两次 rename）依赖 POSIX rename(2) 语义 —— 重命名**目录**时，目录内**已打开**的文件
+ * 不受影响，读者继续读到旧 inode。Windows/NTFS 相反：只要任何进程持有目录内某文件的句柄（读者
+ * 正常的 `readFileSync` 就构成），`MoveFileEx` 即返回 EPERM（实测 3 读者下 6/6 全部失败
+ * `Permission denied`，1 读者下也开始失败）。也就是说在 win32 上**构建本身无法完成发布那一步**，
+ * 与 build.sh 的正确性无关。
+ *
+ * build.sh 的目标平台也不是 win32（头注：`Linux/WSL2 目标平台`；macOS 走两次 rename 退化路径；
+ * AGENTS.md 的 Windows 兼容性红线由 `scripts/win-smoke-test.mjs` 的 T1–T5 承担，不跑我们的构建机
+ * 脚本）。故这里用**真实能力探测**（而非 `process.platform === "win32"` 硬编码）决定是否跳过：
+ * 探测结论可由任何平台复现，探测本身失败（无法建目录/rename）也一律判「不具备」⇒ **绝不误判为
+ * 具备**，也就不会把「不具备」当成通过。在具备该语义的平台上（Linux/WSL2/macOS）本测试照旧全跑，
+ * 断言一条未删。
+ */
+function supportsAtomicDirRenameWithLiveReaders(): boolean {
+  const probeRoot = mkdtempSync(join(tmpdir(), "dsh-graph-g348-probe-"));
+  try {
+    const dir = join(probeRoot, "live");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "f.txt");
+    writeFileSync(file, "x".repeat(1024));
+    // 持有句柄（= 读者形态）：POSIX 上 rename 目录应仍然成功。
+    const fd = openSync(file, "r");
+    try {
+      renameSync(dir, join(probeRoot, "moved"));
+      renameSync(join(probeRoot, "moved"), dir);
+      return true;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+}
+
+/**
  * 一轮实测：同一沙箱内启动 3 个读者进程 → 跑真实 `bash scripts/build.sh` → 构建退出后停读者。
  * 读者的允许内容固定为**构建前**快照，故任何「缺失 / 尺寸不符 / 内容不符」都是真实观测。
  */
@@ -358,6 +401,17 @@ test("g-348 判据 5（结构性守卫）：build.sh 不得对活动 dist 执行
 });
 
 test("g-348 判据 2（行为性守卫）：3 个并发读者 × 3 轮构建，dist 全树零缺失/零不完整", async (t) => {
+  // 前置：本机必须支持「读者持有目录内文件句柄时仍可 rename 目录」的 POSIX 语义。
+  // 不具备时（Windows/NTFS：读者句柄会让 MoveFileEx 返回 EPERM ⇒ 构建的发布步骤必失败）
+  // 显式 skip 并说明理由，而不是把平台限制读成构建缺陷、也不是把断言删掉冒充通过。
+  // 在 Linux/WSL2/macOS 上探测为 true，本测试连同全部断言（含负向对照）照旧执行。
+  if (!supportsAtomicDirRenameWithLiveReaders()) {
+    t.skip(
+      "本机不具备 POSIX rename 语义（win32/NTFS：读者持有目录内句柄时 rename 目录返回 EPERM）——" +
+        "build.sh 的原子发布依赖该语义，目标平台为 Linux/WSL2/macOS；请在这些平台上跑本判据",
+    );
+    return;
+  }
   const sb = makeSandbox();
   try {
     const totalReads = { n: 0 };

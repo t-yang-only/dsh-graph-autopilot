@@ -36,6 +36,14 @@ function tmpRoot(): string {
   return dir;
 }
 
+/** 断言用的路径形态：统一成 `/` 分隔。
+ *  注入段里的「精确路径」是给人/子代理读的提示文本（以 .dsh-graph/ 前缀表述），
+ *  产品在 Windows 上按平台惯例产出 `\`；断言关心的是「目录形态」而非分隔符，
+ *  故断言前归一化，而不要求产品为 prompt 文本切换分隔符。 */
+function posix(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 /** 造一个带 4 张卡的目标：c1=filled、c2=filled+reviewed、c3=empty、c4=collecting。 */
 function goalWithCards(root: string): { goal: string; c1: string; c2: string; c3: string; c4: string } {
   const goal = createGoal(root, { title: "g120 目标", version: "v-t", actor: "test" });
@@ -322,7 +330,7 @@ test("g-240: 超长单卡注入预算截断，保留摘要、精确路径与 dig
   assert.ok(sec.includes("长文本卡片"));
   assert.ok(sec.includes("摘要：长文本摘要分析"));
   assert.ok(sec.includes("⚠️ 正文已超出单卡预算 500 字已截断"), "正文超出单卡预算时被截断");
-  assert.ok(sec.includes(`cards/${c1}.md`), "包含精确卡片路径以供按需查阅");
+  assert.ok(sec.includes(`cards/${c1}.md`) || sec.includes(`cards\\${c1}.md`), "包含精确卡片路径以供按需查阅");
   assert.match(sec, /digest=[a-f0-9]{16}/, "包含卡片内容审计摘要");
   // 确保输出长度受控（远小于 3000 字符）
   assert.ok(sec.length < 1500, "单卡超出预算后注入段长度严格受控");
@@ -355,7 +363,7 @@ test("g-240: 多卡注入总预算控制与折叠机制，保留附件引用且�
   assert.ok(sec.includes("⚠️ 已超出卡片总预算折叠正文"), "超出预算卡片应标注折叠");
   assert.ok(sec.includes("卡片 10"), "第 10 张卡片依然列出，不静默丢失");
   assert.ok(sec.includes("摘要：卡片 10 的简明摘要"), "折叠卡片依然提供摘要");
-  assert.ok(sec.includes(`cards/`), "折叠卡片依然提供精确路径以供按需查阅");
+  assert.ok(sec.includes(`cards/`) || sec.includes(`cards\\`), "折叠卡片依然提供精确路径以供按需查阅");
   assert.ok(sec.includes("@att/doc-10.pdf"), "折叠卡片依然保留附件引用");
   assert.ok(sec.includes("⚠️ 卡片总预算限制：已完整展开"), "底部输出明确可见的总预算统计说明");
 
@@ -380,9 +388,13 @@ test("g-240: 卡片精确路径以 .dsh-graph/ 开头且在工作区根相对路
   const match = sec.match(/完整内容请读取 ([\S]+)，digest=/);
   assert.ok(match, "应包含精确卡片路径");
   const cardRelPath = match[1];
-  assert.ok(cardRelPath.startsWith(".dsh-graph/"), `卡片路径必须以 .dsh-graph/ 开头，当前为: ${cardRelPath}`);
+  // 产品按平台路径惯例产出分隔符（Windows 为 `\`）；这里归一化后断言「以 .dsh-graph/ 开头」的语义形态。
+  assert.ok(
+    posix(cardRelPath).startsWith(".dsh-graph/"),
+    `卡片路径必须以 .dsh-graph/ 开头，当前为: ${cardRelPath}`,
+  );
 
-  // 验证在工作区根拼接后真实存在且可读取
+  // 验证在工作区根拼接后真实存在且可读取（join 按平台分隔符拼接，两种产出都能解析）
   const fullPath = join(ws, cardRelPath);
   assert.ok(existsSync(fullPath), `拼接工作区路径后文件必须存在: ${fullPath}`);
   const content = readFileSync(fullPath, "utf8");

@@ -115,9 +115,26 @@ function head(text) {
   console.log(`\n${"=".repeat(72)}\n${text}\n${"=".repeat(72)}`);
 }
 
+/**
+ * 相对路径的**展示/断言形态**：一律以 `/` 分隔（`collectScanFiles` 的清单契约就按 `/` 书写：
+ * `scripts/build.sh`、`core/tests/…`）。Windows 上 `join`/`readdirSync` 产出 `\`，若直接透传，
+ * 调用方按 `/` 做字面比较的判定（M4 门禁目标清单、按前缀排除忽略目录）会随平台漂移。
+ * 归一化只作用于**展示形态**，比较本身逐字保留原语义（含 startsWith 的目录边界判定）。
+ */
 function rel(from, to) {
-  const r = to.startsWith(from) ? to.slice(from.length) : to;
+  const f = toPosix(from);
+  const t = toPosix(to);
+  const r = t.startsWith(f) ? t.slice(f.length) : t;
   return r.replace(/^[\\/]/, "");
+}
+
+/**
+ * 把平台路径分隔符归一成 `/`（用于与 POSIX 形态的探针表/清单做字面比较）。
+ * **仅在 win32 生效**：POSIX 上 `\` 是合法文件名字符，无条件替换会篡改真实路径；
+ * 在 macOS/Linux 上本函数是恒等变换 ⇒ 既有判定逐字不变。
+ */
+function toPosix(p) {
+  return sep === "\\" ? p.replace(/\\/g, "/") : p;
 }
 
 /** 某一项（P1…P6）的聚合判定：取该项下最严重的 PASS/WARN/FAIL（INFO/SKIP 不计）。 */
@@ -188,7 +205,18 @@ export function parseBsdMountTable(text) {
   return out.join("\n");
 }
 
-/** 解析挂载表文本（三列），返回覆盖 target 的挂载点（最长前缀匹配）。 */
+/**
+ * 解析挂载表文本（三列），返回覆盖 target 的挂载点（最长前缀匹配）。
+ *
+ * 挂载表**始终是 POSIX 形态**（Linux `/proc/mounts`、macOS `mount(8)` 都只有 `/` 分隔的
+ * 绝对路径）。target 的归一化必须与表同一个空间，否则本函数在 win32 上会**恒返回 null**
+ * （`resolve("/tmp/x")` 在 win32 上是 `C:\tmp\x`，与表里任何挂载点都不构成前缀）——
+ * 那会让 P3 探针与自检里的合成样本一起静默失效。故：
+ *   - POSIX 绝对路径（合成样本 / macOS、Linux 真机用法）：原样保留（仅把 `\` 换成 `/`，
+ *     POSIX 路径上该替换是恒等变换）；
+ *   - 其它（Windows 真机用法 / 相对路径）：先 `resolve()` 再归一成 `/` 分隔。
+ * 在 macOS/Linux 上两种写法结果逐字相同 ⇒ 判定逻辑本身一字未变。
+ */
 export function findMountForPath(target, mountsText) {
   const entries = [];
   for (const line of mountsText.split("\n")) {
@@ -199,7 +227,7 @@ export function findMountForPath(target, mountsText) {
     if (!mountPoint.startsWith("/")) continue;
     entries.push({ source: parts[0], mountPoint, fstype: parts[2] });
   }
-  const abs = resolve(target);
+  const abs = sep === "\\" && target.startsWith("/") ? toPosix(target) : toPosix(resolve(target));
   let best = null;
   for (const e of entries) {
     const inside = abs === e.mountPoint || abs.startsWith(e.mountPoint === "/" ? "/" : e.mountPoint + "/");
@@ -1256,15 +1284,22 @@ export function selfCheck() {
   };
 
   // 沙箱根：永不默认落系统 /tmp（沙盒只允许写工作区；且 FS 探针要与 graph root 同 FS）
+  // 合成仓库根用 POSIX 写法，但**期望值必须经同一套 path 语义计算**：win32 上 resolve("/repo/x")
+  // 会补上盘符（C:\repo\x），若拿 POSIX 字面量当期望，四条判定会随平台整体变红（而判定逻辑本身
+  // 并无问题）。在 macOS/Linux 上 resolve() 对绝对 POSIX 路径是恒等变换 ⇒ 期望值与原文逐字相同，
+  // 判定力（默认落 <repo>/tmp/platform-gate、系统 /tmp 被忽略、仓库内 TMPDIR 沿用、--temp-root 优先）
+  // 一字未变。
+  const FAKE_REPO = "/repo/x";
+  const fakeDefault = join(resolve(FAKE_REPO), "tmp", "platform-gate");
   const prevTmp = process.env.TMPDIR;
   try {
     delete process.env.TMPDIR;
-    check("沙箱根默认落仓库内 tmp/platform-gate", resolveTempRoot("/repo/x", null) === join("/repo/x", "tmp", "platform-gate"));
+    check("沙箱根默认落仓库内 tmp/platform-gate", resolveTempRoot(FAKE_REPO, null) === fakeDefault);
     process.env.TMPDIR = "/tmp";
-    check("系统 /tmp 被忽略（绝不落系统临时目录）", resolveTempRoot("/repo/x", null) === join("/repo/x", "tmp", "platform-gate"));
-    process.env.TMPDIR = "/repo/x/tmp/platform-gate";
-    check("仓库内 TMPDIR 被沿用（不重复拼接）", resolveTempRoot("/repo/x", null) === "/repo/x/tmp/platform-gate");
-    check("--temp-root 优先", resolveTempRoot("/repo/x", "/custom") === "/custom");
+    check("系统 /tmp 被忽略（绝不落系统临时目录）", resolveTempRoot(FAKE_REPO, null) === fakeDefault);
+    process.env.TMPDIR = `${FAKE_REPO}/tmp/platform-gate`;
+    check("仓库内 TMPDIR 被沿用（不重复拼接）", resolveTempRoot(FAKE_REPO, null) === resolve(`${FAKE_REPO}/tmp/platform-gate`));
+    check("--temp-root 优先", resolveTempRoot(FAKE_REPO, "/custom") === resolve("/custom"));
   } finally {
     if (prevTmp === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = prevTmp;

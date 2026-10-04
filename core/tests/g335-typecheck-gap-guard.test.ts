@@ -46,7 +46,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 
 const repoRoot = join(import.meta.dirname, "../..");
 const distRoot = join(repoRoot, "dist");
@@ -499,7 +499,16 @@ const SCAN_SKIP_DIRS = new Set([
   ".dsh-graph",
 ]);
 
-/** 递归列出「全仓非忽略文件」相对 repoRoot 的路径（`/` 分隔，便于负向/正向对照断言）。 */
+/**
+ * 递归列出「全仓非忽略文件」相对 repoRoot 的路径。
+ *
+ * **形态契约：一律 `/` 分隔**（判据 4 的正向/反向对照都按 `dsh-graph-host/supervisor-guide.zh.md`、
+ * `node_modules/` 这类 POSIX 字面量断言）。Windows 上 `relative()` 产出 `\`，若直接透传，
+ * 正向断言（`files.includes("dsh-graph-host/…")`）恒假、反向断言（`startsWith("node_modules/")`）
+ * 恒真 —— 前者误红、后者**静默失效**（等于把「不得扫入忽略目录」这条收敛守卫变成永真断言）。
+ * 故在 win32 上把分隔符归一成 `/`（`sep === "\\"` 才生效：POSIX 上 `\` 是合法文件名字符，
+ * 无条件替换会篡改真实文件名，而 macOS/Linux 本来就不需要归一）⇒ 判定口径一字未变。
+ */
 function walkRepoFiles(dir: string = repoRoot): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -507,7 +516,8 @@ function walkRepoFiles(dir: string = repoRoot): string[] {
       if (SCAN_SKIP_DIRS.has(entry.name)) continue;
       out.push(...walkRepoFiles(join(dir, entry.name)));
     } else if (entry.isFile()) {
-      out.push(relative(repoRoot, join(dir, entry.name)));
+      const rel = relative(repoRoot, join(dir, entry.name));
+      out.push(sep === "\\" ? rel.replace(/\\/g, "/") : rel);
     }
   }
   return out;

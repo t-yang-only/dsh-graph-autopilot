@@ -21,7 +21,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import vm from "node:vm";
 import {
   init,
@@ -422,6 +422,18 @@ const MEMORY_500_PATTERNS: Array<[string, RegExp]> = [
   ["旧英文工具描述", /ordinary memory limit 500/],
 ];
 
+/**
+ * 「旧注入截断」的确切文本豁免（v0.29 新增，与记忆限无任何关系）：
+ * 任务连线 note 字段的字数截断（`core/autopilot.ts:addGoalLink` 及其编译产物）——
+ * 它只是恰好也用了 500，不是记忆上限形态。豁免**按文件 + 该行确切文本**登记，
+ * **不放宽正则**：任何其它 `slice(0, 500)`（含记忆注入截断复现）仍无条件判红，
+ * 且下方锚点断言保证登记项仍真实存在（代码删掉豁免项却不清理 => 必红，杜绝空转豁免）。
+ */
+const SLICE_500_ALLOW: Array<[string, string]> = [
+  ["core/autopilot.ts", "note: input.note ? String(input.note).slice(0, 500) : null,"],
+  ["dist/core/autopilot.js", "note: input.note ? String(input.note).slice(0, 500) : null,"],
+];
+
 function walkFiles(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     if (["node_modules", ".git", ".worktrees", ".dsh-graph", "tmp"].includes(name)) continue;
@@ -437,24 +449,48 @@ function walkFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/** 相对 repoRoot 的 POSIX 形式（`a/b/c`）。Windows 上 join() 产出 `\`，直接比较会漏掉全部子路径
+ *  （曾使扫描面塌缩为 1 个文件却仍「全绿」）；统一分隔符后过滤与断言跨平台同义。 */
+function repoRel(abs: string): string {
+  return relative(repoRoot, abs).split(sep).join("/");
+}
+
 test("g-339 判据6：仓库内无残留的记忆 500 上限表述（中英，排除历史事件流与历史数据）", () => {
   const roots = ["core", "dsh-graph-host", "docs", "scripts", "schema"]
     .map((p) => join(repoRoot, p))
     .filter((p) => existsSync(p));
-  const files = walkFiles(repoRoot).filter((f) =>
-    roots.some((r) => f.startsWith(r + "/")) ||
-    /^\/(README|AGENTS|DESIGN|TESTING-g-157)\.md$/.test(f.slice(repoRoot.length)) ||
-    f === join(repoRoot, "package.json") ||
-    f.startsWith(join(repoRoot, "dist") + "/"),
-  );
+  // 过滤统一按 repoRoot 相对 POSIX 路径做（见 repoRel）：Windows 上 join() 是 `\`，
+  // 用绝对路径前缀比较会恒 false，扫描面塌缩到 1 个文件（曾是「静默全绿」的形态）。
+  const files = walkFiles(repoRoot).filter((f) => {
+    const rel = repoRel(f);
+    return (
+      roots.some((r) => rel.startsWith(repoRel(r) + "/")) ||
+      /^(README|AGENTS|DESIGN|TESTING-g-157)\.md$/.test(rel) ||
+      rel === "package.json" ||
+      rel.startsWith("dist/")
+    );
+  });
   assert.ok(files.length > 100, `扫描面过小（${files.length} 个文件），结果不可信`);
 
+  // 豁免锚点：登记的确切文本必须仍存在于对应文件；否则说明豁免已过时（代码已改）。
+  // 断言失败即要求同步更新 SLICE_500_ALLOW —— 防止「豁免名存实亡、悄悄放宽」。
+  for (const [file, text] of SLICE_500_ALLOW) {
+    assert.ok(
+      files.includes(join(repoRoot, file)) && readFileSync(join(repoRoot, file), "utf8").includes(text),
+      `SLICE_500_ALLOW 豁免项已过时：${file} 不再包含登记文本（请同步清理豁免）`,
+    );
+  }
+
+  const allowed = new Set(SLICE_500_ALLOW.map(([file, text]) => `${file}\u0000${text}`));
   const hits: string[] = [];
   for (const file of files) {
+    const rel = repoRel(file);
     const lines = readFileSync(file, "utf8").split("\n");
     for (const [label, re] of MEMORY_500_PATTERNS) {
       lines.forEach((line, i) => {
-        if (re.test(line)) hits.push(`${file.slice(repoRoot.length + 1)}:${i + 1} [${label}] ${line.trim().slice(0, 120)}`);
+        if (!re.test(line)) return;
+        if (allowed.has(`${rel}\u0000${line.trim()}`)) return;
+        hits.push(`${rel}:${i + 1} [${label}] ${line.trim().slice(0, 120)}`);
       });
     }
   }

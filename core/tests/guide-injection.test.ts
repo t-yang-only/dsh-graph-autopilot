@@ -132,14 +132,27 @@ test("g-118：systemPrompt 服务缺失时静默跳过（headless / 测试组合
   apply(ctx, { root }); // 不抛错即可（无 systemPrompt → 静默跳过）
 });
 
-test("g-118/g-119：注入不影响 graph_* 工具注册（16 + bind + help + rename + archive/unarchive + delete + record_attempt_handoff + set_directive + add_comment + delete_card + set_goal_type + postpone_goal = 28）", () => {
+test("g-118/g-119：注入不影响工具注册（graph_* 52 与 autopilot_* 9 各自钉住；本用例原为「16 + … = 28」）", () => {
   const ws = mkdtempSync(join(tmpdir(), "dsh-graph-g118-"));
   const root = resolveRoot({}, ws);
   init(root);
   writeFileSync(join(root, "project.yaml"), "supervisor:\n  session: session-super-1\n");
   const { ctx, registered, sections } = makeMockCtx();
   apply(ctx, { root });
-  assert.equal(registered.length, 49, "全量 49 个 graph_* 工具（g-374 新增 graph_write_results/graph_refresh_results）");
+  // 断言面与用例标题、与同族用例（g342/g347/g371 的「graph_* 计数」）一致：**按族**计数。
+  // 原先直接断言 `registered.length === 49`，那在只有 graph_* 一族时数值恰好相同；g-374 之后
+  // 插件还注册了 `autopilot_*` 族（9 个），裸计数会把「graph_* 少了一个、autopilot_* 多了一个」
+  // 这类一增一减的漂移漏过去。故改为：graph_* 恰 52（真源 = help.zh/help.en 与 README 工具面，
+  // 见 g347/g371）、autopilot_* 恰 9、两族合计恰 61、且各有 1 个 section —— 「无遗漏、无多余、
+  // 无重复」三个方向都仍被钉住，判别力不降反升（新增族也被计数，不再是无名增量）。
+  const names = registered.map((d: any) => d?.name);
+  const graphTools = names.filter((n: string) => n.startsWith("graph_"));
+  const autopilotTools = names.filter((n: string) => n.startsWith("autopilot_"));
+  assert.equal(graphTools.length, 52, "graph_* 工具注册计数为 52（与 g347/g371 的工具面真源一致）");
+  assert.equal(new Set(graphTools).size, 52, "graph_* 无重名");
+  assert.equal(autopilotTools.length, 9, "autopilot_* 工具注册计数为 9（g-374 起由 apply 一并注册）");
+  assert.equal(new Set(autopilotTools).size, 9, "autopilot_* 无重名");
+  assert.equal(registered.length, 61, "两族合计 61，不得有族外工具混入注册面");
   assert.equal(sections.filter((s) => s.name === "dsh-graph-guide-hint").length, 1, "section 只注册一次");
 });
 

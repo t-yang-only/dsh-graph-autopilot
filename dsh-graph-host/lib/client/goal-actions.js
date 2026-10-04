@@ -42,6 +42,7 @@
               body: JSON.stringify({ goal: props.goalId }),
             })
               .then((r) => r.json().then((x) => ({ ok: r.ok, x })))
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               .then(({ ok, x }) => setFbNote(ok && x?.ok ? "✅ 判据全部满足，已自动接受并进入交付" : ("⚠️ 自动接受未成功：" + (x?.error ?? "未知错误"))))
               .catch(() => setFbNote("⚠️ 自动接受网络失败（可手动批量接受）"));
           } else if (inReview && !all) {

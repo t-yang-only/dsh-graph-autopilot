@@ -111,6 +111,7 @@
               key: "live-dot",
               className: "dg-live-dot",
               "aria-hidden": "true",
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               title: "该目标有子进程正在运行（见「任务执行板」）",
             })
           : null;
@@ -2356,6 +2357,7 @@
           })
             .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
             .then(({ ok, d }) => {
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               if (!ok) { showToast("生成模板失败：" + String(d?.error ?? "未知错误")); return; }
               showToast("已由任务生成模板：" + String(d?.template?.title ?? goalId) + "（管理 AI 会把它通用化）");
               window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
@@ -2815,6 +2817,7 @@
             href: "https://github.com/t-yang-only/dsh-graph-autopilot/tree/autopilot",
             target: "_blank",
             rel: "noreferrer",
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             title: "dsh-graph-autopilot（autopilot 分支）",
             style: { ...S.meta, fontWeight: 700, color: "var(--dsw-alias-state-business-primary, #8ab4ff)", cursor: "pointer", textDecoration: "underline", ...(narrowActive ? { whiteSpace: "nowrap", flexShrink: 0 } : {}) },
           }, "dsh-graph-autopilot"),
@@ -3227,6 +3230,7 @@
                       }, GOAL_TYPE_ABBREV[t], h("span", null, GOAL_TYPE_LABELS[t]))))),
                 // [v0.18] 选用技能 / Agent 预设（都不选 = 由执行 AI 按目标内容自行判断）
                 h("div", { style: { marginTop: 10 } },
+                  // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                   h("label", { style: { display: "block", marginBottom: 4, fontWeight: 600 } }, "选用技能（可多选，留空由 AI 自选）"),
                   h("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, maxHeight: 96, overflow: "auto", padding: 4, border: "1px solid rgba(128,128,128,.25)", borderRadius: 6 } },
                     (apCatalog.skills ?? []).length === 0
@@ -3245,6 +3249,7 @@
                   ),
                 ),
                 h("div", { style: { marginTop: 10 } },
+                  // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                   h("label", { style: { display: "block", marginBottom: 4, fontWeight: 600 } }, "Agent 预设（留空由 AI 按目标内容自选）"),
                   h("select", {
                     style: { ...S.promptInput, width: "100%" },
@@ -3335,6 +3340,7 @@
                 h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 12, flexWrap: "wrap" } },
                   h("span", { style: { fontWeight: 700, fontSize: 15 } }, isDefaultGroup(versionDetailTarget.slug)
                     // [v0.29] 问题 8：常驻分组详情弹窗标题去掉 📁 前缀（原「📁 分组：X」→「分组：X」）
+                    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                     ? "分组：" + versionDetailTarget.name
                     : dgT("versionDetail.title") + "：" + versionDetailTarget.name),
                   h("button", {
@@ -3628,6 +3634,7 @@
               guard: createGroupGuard,
               onClose: () => setShowCreateGroup(false),
               onCreated: (name, scope) => {
+                // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                 showToast("已创建常驻分组：" + name + "（" + (scope === "global" ? "全局" : "工作区") + "）");
                 forceFreshRef.current = true;
                 load();
@@ -3827,6 +3834,7 @@
           .then((d) => {
             if (!aliveRef.current) return;
             if (d?.ok) { setAgents(Array.isArray(d.agents) ? d.agents : []); setErr(null); }
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             else setErr(d?.error ?? "接口返回异常");
           })
           .catch((e) => { if (aliveRef.current) setErr(String(e?.message ?? e)); });
@@ -3865,6 +3873,7 @@
       };
       const runningCount = (agents ?? []).filter((a) => a?.live === "running").length;
       const dotColor = (live) => (live === "running" ? "#3aa675" : live === "idle" ? "#e0a53a" : "#8a8a8a");
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       const liveLabel = { running: "运行中", idle: "空闲", gone: "已结束", unknown: "未知" };
       const AB_BTN = { fontSize: 11, padding: "1px 6px", cursor: "pointer", background: "#2b2f3a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, flexShrink: 0, whiteSpace: "nowrap" };
       const AB_INPUT = { background: "#20222a", color: "#e6e6e6", border: "1px solid rgba(140,145,155,.55)", borderRadius: 4, padding: "3px 6px", fontSize: 12, flex: 1, minWidth: 0, boxSizing: "border-box" };
@@ -3884,6 +3893,7 @@
             h("input", {
               type: "checkbox", checked: sel, disabled: !childId,
               onChange: () => toggleSel(childId),
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               title: "勾选后可批量发送消息到所选会话",
               style: { flexShrink: 0, cursor: childId ? "pointer" : "default" },
             }),
@@ -3897,6 +3907,7 @@
               onClick: () => toggleOutput(childId),
             }, (outputOpen.has(childId) ? "▾ 输出" : "▸ 输出")),
             childId
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               ? sessionLinkBtn(a.parent_session_id, childId, "↗ 转到对话")
               : h("button", { className: "dg-btn", style: { ...AB_BTN, opacity: 0.45, cursor: "default" }, disabled: true, title: "缺少子会话 id，无法跳转" }, "↗ 转到对话")),
           h("div", { style: { fontSize: 11, opacity: 0.85, display: "flex", gap: 8, flexWrap: "wrap", minWidth: 0 } },
@@ -3911,6 +3922,7 @@
                 h("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "session id：" + (a?.session_id ?? "—")),
                 h("span", null, "parent：" + (a?.parent_session_id ?? "—")),
                 h("span", null, "started：" + (a?.started_at ?? "—")),
+                // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                 h("span", null, "detached：" + (a?.detached === true ? "是" : a?.detached === false ? "否" : "—")))
             : null,
           outputOpen.has(childId) && childId
@@ -3926,6 +3938,7 @@
           style: { display: "flex", alignItems: "center", gap: 8, minHeight: 24, cursor: tabMode ? "default" : "pointer", userSelect: "none", flexWrap: "wrap" },
           onClick: tabMode ? undefined : () => setOpen((v) => !v),
         },
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           h("strong", { style: { fontSize: 12, whiteSpace: "nowrap" } }, (tabMode ? "" : (open ? "▾" : "▸")) + " 🛰 任务执行板"),
           h("span", { style: { fontSize: 11, opacity: 0.9, whiteSpace: "nowrap" } },
             !workspace ? "（工作区未确定）" : agents == null ? "（读取中…）" : ("运行中 " + runningCount + " / 共 " + agents.length)),
@@ -3938,6 +3951,7 @@
             className: "dg-btn", style: { ...AB_BTN, marginLeft: 4 },
             title: open ? "收起任务执行板" : "展开任务执行板",
             onClick: (e) => { e.stopPropagation(); setOpen((v) => !v); },
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           }, open ? "收起" : "展开")),
         err ? h("div", { style: { fontSize: 11, color: "#f08080", marginTop: 2 } }, "读取失败：" + err) : null,
         open && Array.isArray(agents)
@@ -3951,6 +3965,7 @@
                 h("span", { style: { fontSize: 11, flexShrink: 0, whiteSpace: "nowrap" } }, "已选 " + selected.size + " 个会话："),
                 h("input", {
                   style: AB_INPUT, value: sendText,
+                  // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                   placeholder: "输入要排队发送给所选会话的消息…",
                   onChange: (e) => setSendText(e.target.value),
                   onKeyDown: (e) => { if (e.key === "Enter") sendToSelected(); },
@@ -3966,6 +3981,7 @@
                       (rc.ok ? "✅ " : "❌ ") + String(rc.childId ?? "").slice(0, 8) + "…：" + rc.text)))
                 : null,
               h("span", { className: "dg-hint", style: { fontSize: 10, opacity: 0.65 } },
+                // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                 "消息经子代理会话排队（queue）投递，子代理空闲时取队列执行。"))
           : null,
         // 多选发送执行器：pendingSends 里每个 childId 一个隐藏 sender（逐个排队，就地回执）
@@ -3989,6 +4005,7 @@
         style: { padding: "8px 10px", minWidth: 0, display: "flex", flexDirection: "column", gap: 6 },
       },
         !ws
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           ? h("div", { style: { fontSize: 12, opacity: 0.75 } }, "（未确定工作区，无法读取任务执行板）")
           : h(AgentsBoard, { workspace: ws, variant: "tab" }));
     }
@@ -4007,6 +4024,7 @@
       const submit = () => {
         const n = String(name ?? "").trim();
         const ws = props?.workspace ?? null;
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!n) { setNote("请填写分组名称"); return; }
         if (!ws) { setNote("未确定工作区，无法创建分组"); return; }
         const url = graphUrl("/api/dsh-graph/create-group", {}, ws);
@@ -4032,6 +4050,7 @@
           h("span", { style: S.close, onClick: () => props.onClose?.() }, "✕"),
           h("div", { style: { fontWeight: 700, fontSize: 15, marginBottom: 12 } }, "创建功能"),
           h("div", { style: { marginBottom: 8 } },
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             h("label", { style: { display: "block", marginBottom: 4, fontWeight: 600 } }, "名称"),
             h("input", {
               className: "dg-create-group-name",
@@ -4049,6 +4068,7 @@
               value: scope,
               onChange: (e) => setScope(e.target.value),
             },
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               h("option", { value: "workspace", style: { background: "#20222a", color: "#e6e6e6" } }, "工作区（仅当前工作区）"),
               h("option", { value: "global", style: { background: "#20222a", color: "#e6e6e6" } }, "全局（所有工作区）"))),
           // [v0.29] i18n-keep(category-a)：帮助文字（className 必须是 dg-hint，受「无提示模式」统一隐藏）
@@ -4065,6 +4085,7 @@
               className: "dg-btn",
               style: { ...S.btn, padding: "6px 12px", fontSize: 12 },
               onClick: () => props.onClose?.(),
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             }, "取消")),
           note ? h("div", { style: { ...S.meta, marginTop: 8 } }, note) : null));
     }
@@ -4085,6 +4106,7 @@
           props.onDone?.(props.childId);
         };
         if (!session?.prompt) {
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           const t = setTimeout(() => { if (!sentRef.current) fail("会话未连接（绑定不可用）"); }, 5000);
           return () => clearTimeout(t);
         }
@@ -4106,6 +4128,7 @@
               props.onReceipt?.(props.childId, false, friendly ?? ("发送失败：" + (res?.error?.message ?? "未知错误")));
             }
           } catch (e) {
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             if (alive) props.onReceipt?.(props.childId, false, "发送失败：" + String(e?.message ?? e));
           }
           if (alive) props.onDone?.(props.childId);

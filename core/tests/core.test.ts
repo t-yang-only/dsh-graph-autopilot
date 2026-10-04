@@ -990,7 +990,9 @@ test("g-121：归档目录不进 git（仓库根 .gitignore 排除 handoffs/）"
   writeHandoff(root, "v2"); // 触发归档 → <root>/handoffs/
   assert.equal(existsSync(join(root, "handoffs")), true);
   // 仓库根 .gitignore 断言（相对于测试文件定位仓库根）
-  const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..", "..");
+  // 用 import.meta.dirname 而非 new URL(import.meta.url).pathname——后者在 Windows 上产出
+  // "/C:/Users/..." 形态，再经 join 会拼出 `C:\C:\Users\...` 导致 ENOENT（本仓库既有教训）。
+  const repoRoot = join(import.meta.dirname, "..", "..");
   const gi = readFileSync(join(repoRoot, ".gitignore"), "utf8");
   assert.match(gi, /handoffs\//, "仓库根 .gitignore 应排除 handoffs/ 目录");
 });

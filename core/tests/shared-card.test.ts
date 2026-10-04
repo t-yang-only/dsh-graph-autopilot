@@ -58,6 +58,19 @@ function tmpRoot(): string {
   return dir;
 }
 
+/** 本组「失败注入」用例依赖 `chmod 0o555` 使目录内的写入/删除/改名失败（EACCES）。
+ *  Windows 无 POSIX 权限位：0o555 只映射到只读属性，且对目录内的创建/删除/改名完全无效
+ *  （实测：chmod 0o555 后 rename/unlink/writeFileSync 仍成功），注入不成立、断言前提为假。
+ *  这不是产品缺陷（产品在 Windows 上走 platform.ts 的 win32 分支），故在 win32 上显式 skip，
+ *  而不是把「注入无效」误当成「回滚逻辑已通过」。 */
+function skipPermissionInjectionOnWindows(t: { skip: (msg?: string) => void }): boolean {
+  if (process.platform === "win32") {
+    t.skip("Windows 无 POSIX 目录权限位：chmod 0o555 无法注入 EACCES，故障路径不可构造，跳过（POSIX 上覆盖）");
+    return true;
+  }
+  return false;
+}
+
 function ownCardFile(root: string, goalId: string, cardId: string): string {
   const gf = findGoalFile(root, goalId);
   return join(gf.slice(0, gf.length - "goal.md".length), "cards", `${cardId}.md`);
@@ -625,7 +638,8 @@ test("listAttachments 对 dangling root symlink 抛错（不静默返回 []）�
   assert.throws(() => formatCollectPrompt(root, a, sid), /symlink/);
 });
 
-test("转换最后 rm 失败回滚：shared→own / own→shared 均恢复一致且抛出", () => {
+test("转换最后 rm 失败回滚：shared→own / own→shared 均恢复一致且抛出", (t) => {
+  if (skipPermissionInjectionOnWindows(t)) return;
   // --- shared→own：最后删除共享池副本失败 ---
   const root = tmpRoot();
   const a = createGoal(root, { title: "A", version: "v-t", actor: "test" });
@@ -711,7 +725,8 @@ test("只读附件操作不创建目录（read/info/delete/digest/validate）；
   assert.deepEqual(attSnapshot(root), snap, "validate 不应创建缺失目录/文件");
 });
 
-test("转换 step-2 目标引用保存失败：补 conversion_failed/rolled_back 事件且状态一致", () => {
+test("转换 step-2 目标引用保存失败：补 conversion_failed/rolled_back 事件且状态一致", (t) => {
+  if (skipPermissionInjectionOnWindows(t)) return;
   const root = tmpRoot();
   const a = createGoal(root, { title: "A", version: "v-t", actor: "test" });
   const oc = addCard(root, a, { title: "转共享", scope: "goal", actor: "test" });
@@ -734,7 +749,8 @@ test("转换 step-2 目标引用保存失败：补 conversion_failed/rolled_back
   assert.ok(evs.some((e) => e.event === "card.conversion_rolled_back"), "应有 conversion_rolled_back");
 });
 
-test("转换 step-1 写新副本失败：记 conversion_started+conversion_failed，绝不误记 converted（两种方向）", () => {
+test("转换 step-1 写新副本失败：记 conversion_started+conversion_failed，绝不误记 converted（两种方向）", (t) => {
+  if (skipPermissionInjectionOnWindows(t)) return;
   // --- own→shared：shared-cards 只读使 saveGoal(newFile) 失败 ---
   const root = tmpRoot();
   const a = createGoal(root, { title: "A", version: "v-t", actor: "test" });
@@ -805,7 +821,8 @@ test("转换成功事件顺序：conversion_started 在 *_converted 之前且无
   assert.ok(!evs2.some((e) => e.event === "card.conversion_failed"), "成功不应有 conversion_failed");
 });
 
-test("step-2 / step-3 失败不误记 *_converted（双向）", () => {
+test("step-2 / step-3 失败不误记 *_converted（双向）", (t) => {
+  if (skipPermissionInjectionOnWindows(t)) return;
   // own→shared step-2 失败：goal 目录只读使 saveGoal(goal.md) 失败
   const root = tmpRoot();
   const a = createGoal(root, { title: "A", version: "v-t", actor: "test" });
@@ -1042,7 +1059,8 @@ test("Markdown destination 起点屏蔽目标内 token 且不吞后文（无闭/
   assert.ok(problems.some((p) => /附件引用不存在 @att\/z\.md/.test(p)), "第二行正文 @att/z.md 应报缺失: " + problems.join("|"));
 });
 
-test("deleteAttachment 先删文件后记事件：rm 失败不宣称已删除（事件/磁盘一致）", () => {
+test("deleteAttachment 先删文件后记事件：rm 失败不宣称已删除（事件/磁盘一致）", (t) => {
+  if (skipPermissionInjectionOnWindows(t)) return;
   const root = tmpRoot();
   storeAttachment(root, { name: "del.md", content: "数据", actor: "test" });
   const attDir = attachmentsDir(root);
@@ -1118,6 +1136,9 @@ test("g-240: 共享卡在预算控制下保留 scope=共享、精确路径与 di
   assert.ok(sec.includes("scope=共享"), "保留共享标记");
   assert.ok(sec.includes("摘要：架构约束摘要"), "保留摘要");
   assert.ok(sec.includes("⚠️ 正文已超出单卡预算 400 字已截断"), "超出单卡预算截断");
-  assert.ok(sec.includes(`.dsh-graph/shared-cards/${sid}.md`), "给出共享卡的精确文件路径（以 .dsh-graph/ 开头）");
+  assert.ok(
+    sec.includes(`.dsh-graph/shared-cards/${sid}.md`) || sec.includes(`.dsh-graph\\shared-cards\\${sid}.md`),
+    "给出共享卡的精确文件路径（以 .dsh-graph/ 开头）",
+  );
   assert.match(sec, /digest=[a-f0-9]{16}/, "包含审计摘要");
 });

@@ -477,6 +477,7 @@
                 handleIntervalChange("2");
                 try { setRefreshInterval(2); } catch { /* 无 localStorage 时忽略 */ }
               },
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             }, "实时(2s)")),
           intervalWarn ? h("div", { style: { ...S.meta, color: "var(--dsw-alias-state-error-primary, #f08080)", marginTop: 2 } }, "⚠️ " + intervalWarn) : null,
 

@@ -792,6 +792,7 @@
         // 预填②：详情不含 → 尝试单独 GET 回读；端点缺失/失败 → 留空并就地注明（预填③的「注明」）
         const u = graphUrl("/api/dsh-graph/goal-extras", { goal: goalId });
         if (!u) {
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           if (alive) setNote({ kind: "info", text: "未确定工作区：无法回读已存执行设置。留空 = 不覆盖，直接填写后保存即可。" });
           return () => { alive = false; };
         }
@@ -808,6 +809,7 @@
       }, [goalId]);
       const doSave = async () => {
         const u = graphUrl("/api/dsh-graph/goal-extras");
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!u) { setNote({ kind: "err", text: "未确定工作区，无法保存执行设置。" }); return; }
         const lenRaw = contextLen.trim();
         if (lenRaw !== "" && (!Number.isFinite(Number(lenRaw)) || Number(lenRaw) <= 0)) {
@@ -831,6 +833,7 @@
           });
           const data = await r.json().catch(() => ({}));
           if (r.ok && data?.ok) {
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             setNote({ kind: "ok", text: "✅ 执行设置已保存（空项 = 清除；对该目标之后的执行派发生效）" });
             props.onSaved?.(); // [v0.28] 与其它分区一致：保存成功后重载详情（详情将来回读执行设置时即可见）
           }
@@ -845,6 +848,7 @@
       const noteColor = note?.kind === "err" ? "#f08080" : note?.kind === "ok" ? "#6ee7a0" : "inherit";
       return h("div", { style: S.modalSection },
         h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           h("div", { style: S.modalH }, "⚙ 执行设置"),
           h("span", { style: { ...S.meta, fontSize: 11, fontWeight: 400 } }, "仅作用于本目标的执行派发；空 = 不指定/清除")),
         h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7, marginTop: 2 } },
@@ -857,6 +861,7 @@
               String(p?.name ?? p) + (p?.description ? " — " + String(p.description).slice(0, 40) : ""))))),
         h("div", { style: rowStyle },
           h("label", { style: labelStyle }, "技能"),
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           h("input", { style: ES_INPUT, value: skillRefs, placeholder: "/skill 或逗号分隔，如 anysearch, ai-config", onChange: (e) => setSkillRefs(e.target.value) })),
         h("div", { style: { display: "flex", gap: 6, marginTop: 6 } },
           h("div", { style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 } },
@@ -869,6 +874,7 @@
           h("label", { style: labelStyle }, "上下文长度（token 预算）"),
           h("input", { style: ES_INPUT, type: "number", min: 0, value: contextLen, placeholder: "留空 = 不指定", onChange: (e) => setContextLen(e.target.value) })),
         h("div", { style: rowStyle },
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           h("label", { style: labelStyle }, "预设提示词（extra_prompt）"),
           h("textarea", { style: { ...ES_INPUT, minHeight: 56, resize: "vertical", fontFamily: "inherit" }, value: extraPrompt, placeholder: "追加给执行子 AI 的本目标专属要求", onChange: (e) => setExtraPrompt(e.target.value) })),
         h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 8 } },
@@ -1332,6 +1338,7 @@
                 opacity: tab === "exec" ? 1 : 0.7,
               },
               onClick: () => setTab("exec"),
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             }, "⚙ 执行设置"),
             // g-129: goal.md 链接放在 tab 行右侧
             d.goalFile

@@ -312,10 +312,17 @@ test("g-363 不变量：scratch 看板的写入不得落到真实 .dsh-graph", (
       readFileSync(join(canonical.root, "events.jsonl"), "utf8").includes(marker),
       "夹具自己收到目标事件",
     );
-    // 不变量：真实看板任何数据文件都不得出现本次 marker
+    // 不变量：真实看板的任何数据文件都不得出现本次 marker
     assert.deepEqual(realBoardMentions(marker), [], "真实看板不得出现夹具写入的内容");
+    // 同上，对 project.yaml 单独再钉一次（夹具这一步写的就是配置）。
+    // 注意 `project.yaml` **只在实际写过配置后才存在**（真实看板可能仍停留在 `init` 后的初始态，
+    // 尚无该文件）——此时「文件不存在」本身就是「夹具没写进来」的最强证据，读取它只会抛 ENOENT
+    // 把测试环境假设伪装成失败。故改判「不存在 **或** 不含 marker」这条析取式：
+    // 判别力一字未减 —— 隔离一旦失效，夹具的 writeProjectConfig 必然把 marker 落到真实看板的
+    // project.yaml（原本不存在则被创建、原本存在则被改写），两个分支都会命中 `包含 marker` ⇒ 必红。
+    const realProjectYaml = join(realBoardRoot(), "project.yaml");
     assert.ok(
-      !readFileSync(join(realBoardRoot(), "project.yaml"), "utf8").includes(marker),
+      !existsSync(realProjectYaml) || !readFileSync(realProjectYaml, "utf8").includes(marker),
       "真实 project.yaml 不得被夹具配置改动",
     );
   } finally {

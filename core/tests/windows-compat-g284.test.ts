@@ -13,7 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, lstatSync, utimesSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, parse } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -91,8 +91,11 @@ test("g-284 验收项 1: core/ops.ts 与 dsh-graph-host/core/ops.js 模块顶层
 // ============================================================================
 
 test("g-284 验收项 5: 平台判定收敛到单一注入点，支持测试模拟 win32 与环境变量切换", () => {
-  // 默认在 Linux/WSL2 下
-  assert.equal(isWindows(), false);
+  // 默认值必须如实反映宿主平台（getPlatform 的未注入路径 = DSH_PLATFORM_OVERRIDE ?? process.platform）。
+  // 此前写死 false（「默认在 Linux/WSL2 下」），在 Windows 上本套件自身就会误报——这里改为
+  // 与真实平台对照，既保留「默认真实反映」的语义，又不再绑死某一个 OS。
+  const hostIsWindows = process.platform === "win32";
+  assert.equal(isWindows(), hostIsWindows, "未注入时应如实反映宿主平台");
 
   // setPlatformForTesting 显式切换
   setPlatformForTesting("win32");
@@ -100,7 +103,7 @@ test("g-284 验收项 5: 平台判定收敛到单一注入点，支持测试模�
   assert.equal(getPlatform(), "win32");
 
   setPlatformForTesting(null);
-  assert.equal(isWindows(), false);
+  assert.equal(isWindows(), hostIsWindows, "清除注入后应回落到宿主平台");
 
   // withPlatformForTesting 作用域执行并自动恢复
   const result = withPlatformForTesting("win32", () => {
@@ -108,7 +111,7 @@ test("g-284 验收项 5: 平台判定收敛到单一注入点，支持测试模�
     return "win32-executed";
   });
   assert.equal(result, "win32-executed");
-  assert.equal(isWindows(), false);
+  assert.equal(isWindows(), hostIsWindows, "作用域退出后应恢复宿主平台");
 
   // 检查业务代码中无散落的 process.platform
   const checkFiles = ["core/ops.ts", "core/transaction.ts", "core/events.ts", "core/model.ts"];
@@ -433,7 +436,12 @@ test("g-284 验收项 1 & 2: 名字守卫测试——锁路径、回收路径、
   const WIN_ILLEGAL_CHARS = /[<>:"|?*\x00-\x1F]/;
 
   function assertWindowsPathSegmentsSafe(fullPath: string, label: string) {
-    const segments = fullPath.split(/[/\\]+/).filter(Boolean);
+    // 先剥掉卷/根前缀：Windows 上 `C:` 是盘符（卷指示符），不是文件名片段——
+    // 把它当文件名段校验会误报 `C:\...` 这种合法绝对路径。守卫针对的是产品拼接出的
+    // 相对路径片段（锁名/隔离名里的 token 等），故从 root 之后开始分段。
+    const root = parse(fullPath).root;
+    const relPart = root ? fullPath.slice(root.length) : fullPath;
+    const segments = relPart.split(/[/\\]+/).filter(Boolean);
     assert.ok(segments.length > 0, `${label} 路径不能为空`);
     for (const seg of segments) {
       assert.doesNotMatch(

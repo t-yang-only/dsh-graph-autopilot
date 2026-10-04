@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import vm from "node:vm";
@@ -262,9 +262,18 @@ test("g-279 场景 5：放宽匹配不得误挂无关 worktree，严格拒绝同
   assert.equal(discovery2.items[attId], undefined, "Mismatched branch name must be rejected");
 });
 
-test("g-279 场景 6：真实仓库靶子（g-275/276/277 与 g-270）硬核复核", () => {
+test("g-279 场景 6：真实仓库靶子（g-275/276/277 与 g-270）硬核复核", (t) => {
   const ws = "/home/miuzel/workspace/personal/dsh-graph";
   const root = "/home/miuzel/workspace/personal/dsh-graph/.dsh-graph";
+
+  // 前提：本用例的靶子是**原始作者机器上的真实仓库**——绝对路径 + 固定目标 id + 固定 commit SHA
+  // （928ea52/5d6b1dc/8b16cde/d2efd33）。这些数据在任何其它机器/fork 上都不存在，断言无从验证。
+  // 前提不成立时显式 skip（与 g-359「不可区分即跳过」同一口径），既不把「目标不存在」误当通过，
+  // 也不伪造靶子数据冒充覆盖。在原作者机器上仍逐条生效。
+  if (!existsSync(join(root, "events.jsonl"))) {
+    t.skip("原始作者机器的真实仓库靶子不存在（/home/miuzel/workspace/personal/dsh-graph）：数据不可复现，跳过（在原作者机器上覆盖）");
+    return;
+  }
 
   _clearWorktreeCache();
 

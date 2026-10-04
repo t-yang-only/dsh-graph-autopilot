@@ -46,11 +46,14 @@ test("resolveRoot：默认 workspace 根（process.cwd()）基准 + .dsh-graph�
   assert.equal(resolveRoot(null), resolve(cwd, ".dsh-graph"));
   assert.equal(resolveRoot({}), resolve(cwd, ".dsh-graph"));
   assert.equal(resolveRoot({ root: undefined }), resolve(cwd, ".dsh-graph"));
-  // 相对 root：以 workspace 根为基准
-  assert.equal(resolveRoot({ root: ".dsh-graph" }, "/base"), "/base/.dsh-graph");
-  assert.equal(resolveRoot({ root: "data/g" }, "/base"), "/base/data/g");
-  // 绝对 root：原样返回
-  assert.equal(resolveRoot({ root: "/abs/g" }, "/base"), "/abs/g");
+  // 相对 root：以 workspace 根为基准（基准路径按平台构造——`/base` 在 Windows 上会被
+  // resolve 解释为「当前盘符下的 \base」，与断言字面量不同，故用 join 生成平台基准）
+  const base = join(resolve(cwd, ".."), "base");
+  assert.equal(resolveRoot({ root: ".dsh-graph" }, base), join(base, ".dsh-graph"));
+  assert.equal(resolveRoot({ root: "data/g" }, base), join(base, "data", "g"));
+  // 绝对 root：原样返回（平台绝对路径）
+  const abs = join(resolve(cwd, ".."), "abs-g");
+  assert.equal(resolveRoot({ root: abs }, base), abs);
 });
 
 test("单包 index.js 与 core 的 resolveRoot 行为一致（g-116：合并后单包 re-export + 产物同步）", async () => {
@@ -148,7 +151,7 @@ test("g-116 单包 apply 同时注册 host（tools）与 client（webServer 路�
   // host 半边：28 个 graph_* 工具（g-117 新增 graph_handoff / graph_claim_supervisor；
   // g-119 新增 graph_bind_collect_card；g-118 新增 graph_help；g-141 新增 graph_rename_goal；g-110 新增 archive/unarchive；g-140 新增 delete；g-150 新增 graph_record_attempt_handoff；g-150 范围扩展新增 graph_set_directive / graph_add_comment；g-128 新增 graph_delete_card；g-158 新增 graph_set_goal_type；g-138 新增 graph_postpone_goal；g-183 新增 graph_store_attachment / graph_delete_attachment）
   const toolNames = registered.map((d) => d.name).filter((n) => n.startsWith("graph_"));
-  assert.equal(toolNames.length, 49, "单包注册 49 个 graph_* 工具（g-374 新增 graph_write_results/graph_refresh_results）");
+  assert.equal(toolNames.length, 52, "单包注册 52 个 graph_* 工具（g-374 新增 graph_write_results/graph_refresh_results；g-369 新增 3 个共享卡工具；v0.29 新增 graph_ap_control/graph_collab_post/graph_collab_read）");
   // client 半边：/api/dsh-graph* 全部端点（原 client 包 + g-110 archive/unarchive + g-140 delete + g-158 set-goal-type/create-goal type 透传）
   for (const p of ["/api/dsh-graph", "/api/dsh-graph/goal", "/api/dsh-graph/accept",
     "/api/dsh-graph/resolve-accept", "/api/dsh-graph/edit-description",
@@ -214,8 +217,11 @@ test("g-149 resolveCanonicalRoot：绝对 config.root 跳过 Git 发现", () => 
   const base = mkdtempSync(join(tmpdir(), "g149-abs-config-"));
   const { mainDir, worktreeDir } = setupGitRepo(base, { linkedWorktree: true });
 
-  const result = resolveCanonicalRoot({ root: "/custom/graph" }, worktreeDir!);
-  assert.equal(result.root, "/custom/graph", "绝对 root 原样返回");
+  // 绝对 root 必须用平台绝对路径（POSIX 字面量 `/custom/graph` 在 Windows 上会被 resolve
+  // 解释为「当前盘符根下的 custom/graph」，与断言字面量不同）
+  const customRoot = join(base, "custom-graph");
+  const result = resolveCanonicalRoot({ root: customRoot }, worktreeDir!);
+  assert.equal(result.root, customRoot, "绝对 root 原样返回");
   assert.equal(result.mode, "absolute-config", "mode = absolute-config");
   assert.equal(result.workspace, resolve(worktreeDir!), "workspace 保持原值");
 });

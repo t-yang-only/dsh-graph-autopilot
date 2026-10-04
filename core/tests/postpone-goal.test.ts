@@ -22,6 +22,13 @@ import {
 import { readEvents, replayStatuses } from "../events.ts";
 import { serializeDoc } from "../model.ts";
 
+/** 断言用的路径形态：统一成 `/` 分隔。
+ *  产品代码返回的是所在平台的真实路径（Windows 上是 `\`），断言的是「目录形态」而非分隔符，
+ *  故在断言前归一化，而不是要求产品在 Windows 上产出 POSIX 路径（那样反而无法用于文件系统调用）。 */
+function posix(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 function tmpRoot(): string {
   const dir = mkdtempSync(join(tmpdir(), "dsh-graph-postpone-"));
   init(dir);
@@ -32,12 +39,12 @@ test("postponeGoal：版本目标迁回 backlog 目录形态并置为 draft", ()
   const root = tmpRoot();
   const id = createGoal(root, { title: "暂缓版本", version: "v-t", actor: "test" });
   const before = findGoalFile(root, id);
-  assert.ok(before.includes("/versions/v-t/goals/"), "迁移前在版本目录");
+  assert.ok(posix(before).includes("/versions/v-t/goals/"), "迁移前在版本目录");
 
   postponeGoal(root, id, { actor: "test", reason: "负责人暂缓" });
 
   const after = findGoalFile(root, id);
-  assert.ok(after.endsWith(`backlog/${id}/goal.md`), "迁移后落到 backlog 目录形态");
+  assert.ok(posix(after).endsWith(`backlog/${id}/goal.md`), "迁移后落到 backlog 目录形态");
   assert.ok(!existsSync(before), "原文件应不存在");
 
   const doc = loadGoal(after);
@@ -57,7 +64,7 @@ test("postponeGoal：独立目标迁回 backlog 目录形态", () => {
   postponeGoal(root, id, { actor: "test" });
 
   const after = findGoalFile(root, id);
-  assert.ok(after.endsWith(`backlog/${id}/goal.md`));
+  assert.ok(posix(after).endsWith(`backlog/${id}/goal.md`));
   const doc = loadGoal(after);
   assert.equal(doc.meta.status, "draft");
   assert.equal(doc.meta.version, null);
@@ -78,7 +85,7 @@ test("postponeGoal：带卡片/attempt 的目标整体迁移到 backlog 目录",
   postponeGoal(root, id, { actor: "test" });
 
   const after = findGoalFile(root, id);
-  assert.ok(after.endsWith(`backlog/${id}/goal.md`));
+  assert.ok(posix(after).endsWith(`backlog/${id}/goal.md`));
 
   const goalDir = after.slice(0, after.length - "goal.md".length);
   assert.ok(existsSync(join(goalDir, "cards", `${card}.md`)), "卡片应随目标迁移");
@@ -125,7 +132,7 @@ test("postponeGoal：子代理空闲/完成时允许暂缓", () => {
 
   postponeGoal(root, id, { actor: "test" });
   const after = findGoalFile(root, id);
-  assert.ok(after.endsWith(`backlog/${id}/goal.md`));
+  assert.ok(posix(after).endsWith(`backlog/${id}/goal.md`));
 });
 
 test("goal.postponed 事件被 replay 正确处理为 draft", () => {
@@ -186,6 +193,6 @@ test("postponeGoal：失败时不留半迁移目录", () => {
 
   // 原位置不变，backlog 目录不应创建
   const before = findGoalFile(root, id);
-  assert.ok(before.includes("/versions/v-t/goals/"), "原位置应保留");
+  assert.ok(posix(before).includes("/versions/v-t/goals/"), "原位置应保留");
   assert.ok(!existsSync(join(root, "backlog", id)), "不应留下半迁移目录");
 });

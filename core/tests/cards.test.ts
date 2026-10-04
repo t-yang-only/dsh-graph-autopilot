@@ -32,6 +32,13 @@ function tmpRoot(): string {
   return dir;
 }
 
+/** 断言用的路径形态：统一成 `/` 分隔。
+ *  产品代码返回的是所在平台的真实路径（Windows 上是 `\`），断言的是「目录形态」而非分隔符，
+ *  故在断言前归一化，而不是要求产品在 Windows 上产出 POSIX 路径（那样反而无法用于文件系统调用）。 */
+function posix(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 test("add-card 建卡并按序登记 context_cards", () => {
   const root = tmpRoot();
   const id = createGoal(root, { title: "t", version: "v-t", actor: "test" });
@@ -257,8 +264,8 @@ test("backlog 目标 goalDetail 正常返回 draft + 空卡片", () => {
   assert.equal(d.meta.id, id);
   assert.deepEqual(d.cards, []);
   assert.deepEqual(d.attempts, []);
-  assert.ok(d.goalFile.includes("/backlog/"), "goalFile 应在 backlog 目录");
-  assert.ok(!d.goalFile.endsWith("/goal.md"), "backlog 文件名不是 goal.md");
+  assert.ok(posix(d.goalFile).includes("/backlog/"), "goalFile 应在 backlog 目录");
+  assert.ok(!posix(d.goalFile).endsWith("/goal.md"), "backlog 文件名不是 goal.md");
 });
 
 test("backlog 目标 addCard 仍被拒绝", () => {
@@ -276,7 +283,7 @@ test("非 backlog 目标 goalDetail 返回正常且可建卡", () => {
   const d = goalDetail(root, id);
   // g-287：独立目标创建即为 planning（draft 现在精确等价于「在 backlog」）
   assert.equal(d.meta.status, "planning");
-  assert.ok(d.goalFile.endsWith("/goal.md"), "standalone 文件名应为 goal.md");
+  assert.ok(posix(d.goalFile).endsWith("/goal.md"), "standalone 文件名应为 goal.md");
   const c = addCard(root, id, { title: "card1", kind: "text", actor: "test", scope: "goal" });
   assert.ok(c.startsWith("card-"));
 });
@@ -292,7 +299,7 @@ test("g-154：goalDetail 卡片含 cardFile 绝对路径（指向实际卡片 .m
   assert.ok(card.cardFile.endsWith(`${c1}.md`), "cardFile 应以卡片 id.md 结尾");
   assert.ok(existsSync(card.cardFile), "cardFile 指向的文件应存在");
   // cardFile 与 goalFile 同目录下 cards/
-  assert.ok(card.cardFile.includes("/cards/"), "cardFile 应在 cards/ 目录下");
+  assert.ok(posix(card.cardFile).includes("/cards/"), "cardFile 应在 cards/ 目录下");
 });
 
 test("g-154：goalCards 也暴露 cardFile 字段", () => {

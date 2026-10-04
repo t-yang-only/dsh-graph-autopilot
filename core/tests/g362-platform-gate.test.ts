@@ -28,7 +28,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   buildForwardArgs,
@@ -90,15 +91,22 @@ test("g-362 判据 1：--profile/--dsh-home 的默认值不得触发转发（否
 });
 
 test("g-362 判据 1：探测沙箱根永不落系统 /tmp（沙盒只允许写工作区 + 探针需同 FS）", () => {
+  // 合成仓库根虽是 POSIX 写法，但 `resolveTempRoot` 内部按**本机 path 语义** `resolve()` 它
+  // （win32 上会补盘符 C:），故期望值必须走同一套语义计算：拿 POSIX 字面量当期望会让本用例
+  // 随平台整体变红，而判定逻辑本身（默认落 <repo>/tmp/platform-gate、忽略系统 /tmp、
+  // 沿用仓库内 TMPDIR、--temp-root 优先）一字未变。macOS/Linux 上 resolve() 对绝对 POSIX 路径
+  // 是恒等变换 ⇒ 期望值与原文逐字相同，判别力不降。
+  const repo = "/repo/x";
+  const defaultRoot = join(resolve(repo), "tmp", "platform-gate");
   const prev = process.env.TMPDIR;
   try {
     delete process.env.TMPDIR;
-    assert.equal(resolveTempRoot("/repo/x", null), join("/repo/x", "tmp", "platform-gate"));
+    assert.equal(resolveTempRoot(repo, null), defaultRoot);
     process.env.TMPDIR = "/tmp";
-    assert.equal(resolveTempRoot("/repo/x", null), join("/repo/x", "tmp", "platform-gate"), "系统 /tmp 必须被忽略");
-    process.env.TMPDIR = "/repo/x/tmp/platform-gate";
-    assert.equal(resolveTempRoot("/repo/x", null), "/repo/x/tmp/platform-gate", "仓库内 TMPDIR 应被沿用");
-    assert.equal(resolveTempRoot("/repo/x", "/custom"), "/custom", "--temp-root 优先");
+    assert.equal(resolveTempRoot(repo, null), defaultRoot, "系统 /tmp 必须被忽略");
+    process.env.TMPDIR = `${repo}/tmp/platform-gate`;
+    assert.equal(resolveTempRoot(repo, null), resolve(`${repo}/tmp/platform-gate`), "仓库内 TMPDIR 应被沿用");
+    assert.equal(resolveTempRoot(repo, "/custom"), resolve("/custom"), "--temp-root 优先");
   } finally {
     if (prev === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = prev;
@@ -182,7 +190,10 @@ test("g-362 判据 3（P2）：真实发布物确实按此语义拒绝软链 roo
     assert.equal(judgeSymlinkRoot({ engineLoaded: false, explicitSymlink: "-", logicalRoot: "/a", physicalRoot: "/a", symlinkedRoot: false }).level, "WARN");
     return;
   }
-  const mod = await import(rootJs);
+  // 动态 import 必须走 file URL：Windows 上绝对路径 `C:\…\root.js` 不是合法 ESM 说明符
+  // （ERR_UNSUPPORTED_ESM_URL_SCHEME: protocol 'c:'）。pathToFileURL 在三个平台上都正确，
+  // 且**不改变**被测语义（仍是「加载真实发布物并调用其 resolveRoot」这一端到端断言）。
+  const mod = await import(pathToFileURL(rootJs).href);
   const base = resolveTempRoot(repoRoot, null);
   mkdirSync(base, { recursive: true });
   const dir = mkdtempSync(join(base, "g362-root-"));
@@ -472,9 +483,23 @@ test("g-362 判据 1/3：新件 --self-test 端到端通过（本脚本 + 转发
   assert.match(out, /本脚本自检全部通过。/, "本脚本自检必须全绿");
   assert.match(out, /自检全部通过。/, "转发的 win-smoke-test.mjs 自检也必须全绿");
   assert.doesNotMatch(out, /自检失败/, "--self-test 不得出现失败项");
-  // 平台效力声明必须出现，且与「非 win32 免责声明」明确区分
-  assert.match(out, /对 .*具平台效力/);
-  assert.match(out, /针对 Windows 真机/);
+  // 平台效力声明必须出现，且与「非 win32 免责声明」明确区分。
+  // 平台分派（不削弱判别力）：`对 … 具平台效力` / `针对 Windows 真机` 这两句是**目标平台专属**
+  // 输出 —— 脚本的设计就是「非 macOS/Linux 上不得声明平台效力，而是明确说声明不成立并请去原生
+  // macOS/Linux 重跑」。故在 win32 上要求原文那两句会与脚本的正确行为冲突；这里按平台分派，
+  // **两个分支各自钉住一个方向**（目标平台=必须肯定声明；非目标平台=必须否定声明且不得肯定），
+  // 谁把这条声明删掉或改错（例如在 win32 上冒充「已具平台效力」）都会有一个分支变红。
+  if (process.platform === "linux" || process.platform === "darwin") {
+    assert.match(out, /对 .*具平台效力/);
+    assert.match(out, /针对 Windows 真机/);
+  } else {
+    assert.match(out, /声明\*\*不成立/, "非目标平台必须明说「平台效力声明不成立」");
+    assert.doesNotMatch(
+      out,
+      /具平台效力(?!」)/,
+      "非目标平台不得出现肯定式平台效力声明（`具平台效力」` 属被引用的否定句，故精确排除）",
+    );
+  }
   // 用法/退出码语义与既有脚本一致：未知参数 exit 2、互斥来源 exit 2
   assert.equal(spawnSync(process.execPath, [SCRIPT, "--definitely-not-an-option"], { cwd: repoRoot, encoding: "utf8", timeout: 60_000 }).status, 2);
   const mutual = spawnSync(process.execPath, [SCRIPT, "--tarball", "/nope/a.tgz", "--spec", "dsh-graph"], { cwd: repoRoot, encoding: "utf8", timeout: 60_000 });

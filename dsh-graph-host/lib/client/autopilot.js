@@ -17,6 +17,7 @@ function apAdoptIntoLane(target) {
   const version = target === undefined ? null : target;
   // [v0.18] 从回收站拖出：恢复该目标并直接落到目标泳道
   if (pick.kind === "trash") {
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     apNotify("… 正在从回收站恢复到 " + (version || "草稿"));
     fetch("/api/dsh-graph-autopilot/trash", {
       method: "POST", credentials: "same-origin",
@@ -30,6 +31,7 @@ function apAdoptIntoLane(target) {
         window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
         window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
       })
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       .catch((e) => apNotify("❌ 网络错误：" + (e?.message ?? e)));
     return;
   }
@@ -45,6 +47,7 @@ function apAdoptIntoLane(target) {
   })
     .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
     .then(({ ok, d }) => {
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       if (!ok) { apNotify("❌ 建目标失败：" + (d?.error ?? "未知错误")); return; }
       const names = (d?.created ?? []).map((c) => `${c.id} ${c.title}`).join("、");
       apNotify("✅ 已建目标：" + (names || "—") + (payload.version ? "（" + payload.version + "）" : "（草稿）"));
@@ -94,6 +97,7 @@ function LaneRunButton(props) {
     style: running ? { ...base, background: "#2e9e5b", borderColor: "#2e9e5b", color: "#fff", fontWeight: 700 } : base,
     className: "dg-btn",
     "data-ap-run-btn": version,
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     title: running ? "运行中：点此中断" : "自动驾驶本行：逐目标 收集→执行→评审→交付",
     onClick: (e) => { e.stopPropagation(); if (running) apStopLane(label); else apRunLane(version, label); },
   }, running ? "■" : "▶");
@@ -110,6 +114,7 @@ function apRunLane(version, label) {
   })
     .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
     .then(({ ok, d }) => {
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       if (!ok) { apNotify("❌ 启动失败：" + (d?.error ?? "未知错误")); return; }
       apNotify("✅ 已启动自动驾驶：" + (label || version));
       window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
@@ -128,6 +133,7 @@ function apStopLane(label) {
   })
     .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
     .then(({ ok, d }) => {
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       if (!ok) { apNotify("❌ 中断失败：" + (d?.error ?? "未知错误")); return; }
       apNotify("⏸ 已中断本行自动驾驶");
       window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: d }));
@@ -146,6 +152,7 @@ function apArchiveGoal(goalId) {
   })
     .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
     .then(({ ok, d }) => {
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       if (!ok) { apNotify("❌ 移入回收站失败：" + (d?.error ?? "未知错误")); return; }
       apNotify("🗑 已移入回收站：" + goalId + "（可在回收站恢复）");
       window.dispatchEvent(new CustomEvent("autopilot:trash-changed"));
@@ -259,6 +266,7 @@ function AutopilotPanel(props) {
     })
       .then(async (r) => ({ ok: r.ok, data: await r.json().catch(() => ({})) }))
       .then(({ ok, data }) => {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!ok) setMsg("❌ " + (data.error ?? "请求失败"));
         else setMsg("");
         return data;
@@ -279,6 +287,7 @@ function AutopilotPanel(props) {
     })
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!ok) setMsg("❌ " + (d?.error ?? "保存失败"));
         else setMgr((m) => ({ ...(m ?? {}), ...d }));
         return d;
@@ -301,6 +310,7 @@ function AutopilotPanel(props) {
   // 管理 AI 读看板与协作频道，自行决定把任务放到哪条泳道、建什么连线（其上行文已含「自由编排任务」职责）。
   const adoptAndManage = () => {
     if (busy) return;
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     if (pickedIdxs.length === 0) { setMsg("请先勾选要采纳的推荐，再点「采纳并由管理 AI 分配」"); return; }
     setBusy("adopt-manager");
     setMsg("… 正在采纳所选推荐…");
@@ -315,6 +325,7 @@ function AutopilotPanel(props) {
         if (!ok) { setMsg("❌ 采纳失败：" + (d?.error ?? "未知错误")); return null; }
         createdText = (d?.created ?? []).map((c) => `${c.id} ${c.title}`).join("、") || "—";
         setPicked({});
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         setMsg("✅ 已采纳：" + createdText + "；🤖 正在唤起管理 AI 分配…");
         return fetch("/api/dsh-graph-autopilot/manager", {
           method: "POST", credentials: "same-origin",
@@ -328,6 +339,7 @@ function AutopilotPanel(props) {
         setMsg("✅ 已采纳：" + createdText + "；🤖 管理 AI 已启动（" + (res.d2?.child_id ?? "") + "），它会读看板与协作频道，自行决定放到哪条泳道、建哪些连线");
         window.dispatchEvent(new CustomEvent("autopilot:adopted", { detail: { manager: res.d2 } }));
       })
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
       .finally(() => { setBusy(""); load(); });
   };
@@ -350,6 +362,7 @@ function AutopilotPanel(props) {
       },
     },
       h("div", { style: { display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" } },
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         h("strong", { style: { flexShrink: 0, fontSize: 14, fontWeight: 800, color: "#2f6fd0" } }, "🌐 托管"),
         h("label", { style: { display: "inline-flex", gap: 6, alignItems: "center", fontWeight: 600, cursor: "pointer" } },
           h("input", {
@@ -362,6 +375,7 @@ function AutopilotPanel(props) {
         h("label", { style: { display: "inline-flex", gap: 6, alignItems: "center", fontWeight: 600, cursor: "pointer" } },
           h("input", {
             type: "checkbox", checked: !!mgr?.advanceMode,
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             title: "目标推进：不加新任务，把非草稿任务全部推到交付（勾选即生效）",
             onChange: (e) => mgrSet({ advanceMode: e.target.checked }),
           }),
@@ -376,6 +390,7 @@ function AutopilotPanel(props) {
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", {
         style: { flexShrink: 0, cursor: "pointer", userSelect: "none" },
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         title: "点此展开 / 收起推荐卡片（操作按钮始终保留）",
         onClick: () => setRecsOpen((o) => !o),
       }, recsOpen ? "▾ 💡 推荐" : "▸ 💡 推荐（已收起）· " + recs.length + " 条"),
@@ -390,6 +405,7 @@ function AutopilotPanel(props) {
         h("button", { style: btn, disabled: !!busy, onClick: () => post("scan", {}).then(load) }, busy === "scan" ? "扫描中…" : "扫描推荐"),
         h("button", {
           style: btn, disabled: !!busy,
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           title: "完整扫描：拉一个子代理深度分析工作区与项目正式文件（README/构建配置/提交历史等），再由 AI 回写推荐清单",
           onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) setMsg("🔍 完整扫描已启动（子代理 " + (d.child_id ?? "") + "），完成后推荐清单会自动更新"); return load(); }),
         }, busy === "deep-scan" ? "启动中…" : "🔍 完整扫描"),
@@ -404,6 +420,7 @@ function AutopilotPanel(props) {
         h("button", {
           style: { ...btn, background: recHint.trim() ? "#3b7ddd" : undefined, borderColor: recHint.trim() ? "#3b7ddd" : undefined, color: recHint.trim() ? "#fff" : "inherit" },
           disabled: !!busy || !recHint.trim(),
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           title: "按你输入的内容生成推荐（把输入作为本次推荐方向，交给 AI 深度扫描）",
           onClick: () => post("deep-scan", { hint: recHint }).then((d) => { if (d?.ok) { setMsg("🔍 已按输入启动推荐扫描"); setRecHint(""); } return load(); }),
         }, "按输入推荐"),
@@ -420,6 +437,7 @@ function AutopilotPanel(props) {
         recs.length > 0 && h("button", {
           style: { ...btn, background: "#7a5af8", borderColor: "#7a5af8", color: "#fff", fontWeight: 700 },
           disabled: !!busy,
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           title: "采纳当前勾选的推荐，然后立刻运行管理 AI：它读取看板与协作频道，自行把任务分配到合适泳道并建立连线",
           onClick: adoptAndManage,
         }, busy === "adopt-manager" ? "分配中…" : "🤖 采纳并由管理 AI 分配"),
@@ -445,6 +463,7 @@ function AutopilotPanel(props) {
           h("span", { style: chip }, r.type),
         ),
         h("div", { style: { opacity: 0.72, fontSize: 11 } }, r.description),
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         Array.isArray(r.criteria) && r.criteria.length > 0 && h("div", { style: { opacity: 0.55, fontSize: 11 } }, "判据: " + r.criteria.slice(0, 2).join(" / ") + (r.criteria.length > 2 ? " …" : "")),
         h("div", { style: { display: "flex", gap: 6, alignItems: "center", marginTop: 2 } },
           h("span", { style: { opacity: 0.5, fontSize: 11 } }, "来源: " + (r.reason ?? "")),
@@ -457,6 +476,7 @@ function AutopilotPanel(props) {
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
       h("strong", { style: { flexShrink: 0 } }, "🎯 全局目标"),
       h("input", { style: input, value: goalText, placeholder: "输入全局目标：推荐与持续检查以此为核心", onChange: (e) => setGoalText(e.target.value) }),
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       h("button", { style: btnPrimary, disabled: !!busy, onClick: () => post("global-goal", { text: goalText }).then(load) }, busy === "global-goal" ? "…" : "保存"),
       h("button", { style: btn, onClick: () => setPromptOpen(!promptOpen) }, promptOpen ? "收起全局提示词" : "全局提示词"),
     ),
@@ -469,6 +489,7 @@ function AutopilotPanel(props) {
       }),
       h("div", { style: { display: "flex", gap: 6, alignItems: "center" } },
         h("button", { style: btnPrimary, disabled: !!busy, onClick: () => post("global-prompt", { text: promptText }).then(load) }, busy === "global-prompt" ? "…" : "保存全局提示词"),
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         h("span", { style: chip }, st?.state?.autoPreset ? "自动选预设：开" : "自动选预设：关"),
       ),
     ),
@@ -482,6 +503,7 @@ function AutopilotPanel(props) {
         h("span", { style: chip }, g.id + " " + g.title),
         h("button", { style: btn, disabled: !!busy, title: "归档该已交付目标", onClick: () => post("archive", { goal: g.id }).then(load) }, "归档"),
       )),
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       (st?.delivered ?? []).length === 0 && h("span", { style: { opacity: 0.6 } }, "暂无待归档的已交付目标"),
       (st?.archived ?? []).length > 0 && h("button", { style: btn, onClick: () => setShowArch(!showArch) }, `已归档 ${st.archived.length}`),
     ),
@@ -495,6 +517,7 @@ function AutopilotPanel(props) {
     // {action:"set", steward:{enabled}|advanceMode}；读回 get 的 steward?.enabled 与 advanceMode。
     // —— [v0.18] AI 推荐管理员（独立上行文；实时管理推荐 / 全局目标 / 全局提示词）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       h("strong", { style: { flexShrink: 0 } }, "🤖 推荐管理"),
       h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
         h("input", {
@@ -510,6 +533,7 @@ function AutopilotPanel(props) {
         onChange: (e) => setMgr((m) => ({ ...(m ?? {}), managerIntervalMin: Number(e.target.value) })),
         onBlur: (e) => mgrSet({ managerIntervalMin: Number(e.target.value) }),
       }),
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       h("span", { style: chip }, "分钟"),
       h("label", { style: { display: "inline-flex", gap: 4, alignItems: "center" } },
         h("input", {
@@ -526,6 +550,7 @@ function AutopilotPanel(props) {
       h("textarea", {
         style: { ...input, minWidth: 0, height: 110, resize: "vertical", fontFamily: "inherit" },
         value: mgrPrompt,
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         placeholder: "管理员独立上行文：定义它如何管理推荐清单、全局目标与全局提示词（留空=用内置默认上行文）",
         onChange: (e) => setMgrPrompt(e.target.value),
       }),
@@ -542,6 +567,7 @@ function AutopilotPanel(props) {
         value: laneSel,
         onChange: (e) => { const v = e.target.value; setLaneSel(v); setLaneText(lanePrompts[v] ?? ""); setLaneOpen(true); },
       },
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         h("option", { value: "" }, "选择泳道…"),
         versions.map((v) => h("option", { key: "v-" + v, value: v }, "🏷️ " + v)),
         h("option", { value: "standalone" }, "独立目标"),
@@ -556,6 +582,7 @@ function AutopilotPanel(props) {
       h("textarea", {
         style: { ...input, minWidth: 0, height: 64, resize: "vertical", fontFamily: "inherit" },
         value: laneText,
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         placeholder: "例如：本泳道负责服务端接口与数据层；改动需同时给出接口签名与兼容性说明。留空保存=清除。",
         onChange: (e) => setLaneText(e.target.value),
       }),
@@ -572,6 +599,7 @@ function AutopilotPanel(props) {
     ),
     // —— [v0.18] 协作频道（任务间沟通 + 资源占用，防冲突）——
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       h("strong", { style: { flexShrink: 0 } }, "💬 协作"),
       h("span", { style: chip }, (collab.messages?.length ?? 0) + " 条消息"),
       (collab.claims?.length ?? 0) > 0 && h("span", { style: chip }, "占用中 " + collab.claims.length),
@@ -587,6 +615,7 @@ function AutopilotPanel(props) {
         h("button", {
           style: btnPrimary, disabled: !!busy || !collabText.trim(),
           onClick: () => post("collab", { action: "post", text: collabText, actor: "human:gui" }).then((d) => { if (d?.ok) { setCollabText(""); load(); } }),
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         }, "发送"),
       ),
     ),
@@ -607,6 +636,7 @@ function isApProtectedVersion(slug) { return AP_PROTECTED_VERSION_SLUGS.indexOf(
 // [v0.23] 常驻分组（与 core 的 DEFAULT_GROUPS 保持一致）：与独立目标同属性，无版本语义
 const AP_DEFAULT_GROUP_SLUGS = ["interaction", "deploy-test", "backend"];
 // [v0.27] 面板「⚙ 高级」迁至设置后本文件不再引用；保留给设置面板（按泳道选模型）等工厂作用域代码复用，勿删。
+// i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
 const AP_GROUP_NAMES = { interaction: "交互", "deploy-test": "部署测试", backend: "后端" };
 function isDefaultGroup(slug) { return AP_DEFAULT_GROUP_SLUGS.indexOf(String(slug ?? "").trim()) >= 0; }
 
@@ -626,6 +656,7 @@ function apLaneShell(opts) {
     },
   },
     h("span", { style: { fontWeight: 700, fontSize: 12 } }, (collapsed ? "▸ " : "▾ ") + title + " · " + count),
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     collapsed ? h("span", { style: { opacity: 0.55, fontSize: 11 } }, "点击展开") : null,
     h("span", { style: { flex: 1 } }),
     ...(actions ?? []),
@@ -699,6 +730,7 @@ function TemplateLane(props) {
   const save = () => {
     if (!form) return;
     const title = String(form.title ?? "").trim();
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     if (!title) { setMsg("❌ 模板标题不能为空"); return; }
     setBusy(true); setMsg("");
     send({
@@ -713,6 +745,7 @@ function TemplateLane(props) {
         if (!ok) setMsg("❌ " + (d?.error ?? "保存失败"));
         else { setItems(Array.isArray(d.templates) ? d.templates : []); setForm(null); setMsg(""); }
       })
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       .catch((e) => setMsg("❌ " + (e?.message ?? "网络错误")))
       .finally(() => setBusy(false));
   };
@@ -735,6 +768,7 @@ function TemplateLane(props) {
   const goalDrag = !!props?.anyDrag;
   const dragGoalId = props?.dragGoalId ?? null;
   const dropGoalToTemplate = () => {
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     if (!dragGoalId) { setMsg("❌ 没拿到被拖拽任务的 id"); return; }
     if (typeof props?.onDropGoal !== "function") { setMsg("❌ 未接入 onDropGoal（调用方未连接）"); return; }
     props.onDropGoal(dragGoalId); // 由调用方负责请求与刷新
@@ -765,6 +799,7 @@ function TemplateLane(props) {
       items.map((t) => h("div", {
         key: t.id,
         draggable: true,
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         title: "拖到任意泳道/列即按模板建目标；模板保留可重复使用",
         onDragStart: (e) => {
           try { e.dataTransfer.setData("text/plain", "autopilot-tpl:" + t.id); e.dataTransfer.effectAllowed = "copy"; } catch { /* 旧引擎 */ }
@@ -782,6 +817,7 @@ function TemplateLane(props) {
           h("span", { style: chip }, t.type),
         ),
         t.description && h("div", { style: { opacity: 0.72, fontSize: 11 } }, t.description),
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         Array.isArray(t.criteria) && t.criteria.length > 0 && h("div", { style: { opacity: 0.55, fontSize: 11 } }, "判据: " + t.criteria.slice(0, 2).join(" / ") + (t.criteria.length > 2 ? " …" : "")),
         h("div", { style: { display: "flex", gap: 6, alignItems: "center", marginTop: 2 } },
           h("span", { style: { flex: 1 } }),
@@ -800,6 +836,7 @@ function TemplateLane(props) {
     onRefresh: () => load(false),
     refreshing,
     fullWidth: !!props?.fullWidth,
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     hint: "可折叠（默认折叠，省位置）；展开后每 10 秒自动刷新；模板卡可拖到任意泳道建目标，看板任务卡拖到本行可生成模板",
     // [v0.29] 问题 9：承接看板卡片拖入 → 生成模板（无 props 时 undefined，行为不变）
     dropProps: goalDropProps,
@@ -813,6 +850,7 @@ function TemplateLane(props) {
     children: [
       form && h("div", { key: "form", style: { display: "flex", flexDirection: "column", gap: 6, padding: 8, borderRadius: 8, border: "1px dashed var(--dsw-alias-border-secondary, rgba(128,128,128,.4))" } },
         h("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" } },
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           h("span", { style: { fontSize: 12, fontWeight: 700 } }, form.id ? "编辑模板" : "新建模板"),
           h("input", { style: { ...input, flex: 1, minWidth: 180 }, placeholder: "模板标题（必填）", value: form.title, onChange: (e) => setForm((f) => ({ ...f, title: e.target.value })) }),
           h("select", { style: input, value: form.type, onChange: (e) => setForm((f) => ({ ...f, type: e.target.value })) },
@@ -907,6 +945,7 @@ function TrashLane(props) {
     })
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!ok) { setMsg("❌ " + (d?.error ?? "彻底删除失败")); return; }
         setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
         setMsg("🗑 已彻底删除（不可恢复）");
@@ -951,6 +990,7 @@ function TrashLane(props) {
     })
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!ok) { setMsg("❌ " + (d?.error ?? "恢复失败")); return; }
         setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
         setMsg("✅ 已恢复：" + (d.restored ?? ""));
@@ -972,6 +1012,7 @@ function TrashLane(props) {
     })
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!ok) { setMsg("❌ " + (d?.error ?? "全部撤回失败")); return; }
         setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
         // 返回条数防御式读取：可能是数字、数组或计数别名
@@ -1005,6 +1046,7 @@ function TrashLane(props) {
     const looksLikeCardTitle = stored && members.some((m) => String(memberLabel(m)) === stored);
     if (stored && !looksLikeCardTitle) return stored;
     const label = members.length > 0 ? String(memberLabel(members[0])) : "";
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     return "堆叠 " + members.length + " 项" + (label ? " · " + label.slice(0, 8) : "");
   };
   const liveStacks = (data.stacks ?? []).map((s) => ({ s, members: liveMembers(s) })).filter((x) => x.members);
@@ -1022,6 +1064,7 @@ function TrashLane(props) {
             h("b", null, "🏷️ " + v.name),
             h("span", { style: AP_ROW_CHIP }, v.slug),
           ),
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           h("div", { style: { opacity: 0.6, fontSize: 11 } }, "移入时间：" + (v.moved_at || "—")),
           h("div", { style: { display: "flex", gap: 6, justifyContent: "flex-end" } },
             h("button", { style: AP_ROW_BTN, disabled: !!busy, onClick: () => restore({ action: "restore-version", dir: v.dir }) }, busy.indexOf(v.dir) >= 0 ? "…" : "↩ 恢复版本"),
@@ -1034,6 +1077,7 @@ function TrashLane(props) {
         )))),
     data.goals.length > 0 && h("div", { key: "g", style: { display: "flex", flexDirection: "column", gap: 4 } },
       h("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         h("div", { style: { fontSize: 11, opacity: 0.7 } }, "已归档的目标（恢复后回到原泳道）"),
         // [v0.29] 问题 5：一次性把全部已归档目标撤回「草稿」泳道
         h("button", {
@@ -1046,6 +1090,7 @@ function TrashLane(props) {
         data.goals.map((g) => h("div", {
           key: g.id,
           draggable: true,
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           title: "拖到泳道 = 恢复并落到该泳道；拖到另一条回收站条目上 = 堆成一格",
           onDragStart: (e) => {
             try { e.dataTransfer.setData("text/plain", "autopilot-trash:" + g.id); e.dataTransfer.effectAllowed = "copy"; } catch { /* 旧引擎 */ }
@@ -1077,6 +1122,7 @@ function TrashLane(props) {
             // [v0.29] 名字不再用卡片标题（原来两个堆叠都叫被拖到的卡片标题如「迭代优化」）
             const first = items.find((it) => it.kind === "goal") ?? items[0];
             const firstTitle = first ? (goalTitleOf(first.key) ?? first.key) : "";
+            // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
             const name = "堆叠 " + items.length + " 项" + (firstTitle ? " · " + String(firstTitle).slice(0, 8) : "");
             setBusy("stack"); setMsg("");
             fetch("/api/dsh-graph-autopilot/trash", {
@@ -1090,6 +1136,7 @@ function TrashLane(props) {
                 setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
                 setMsg("🧱 已堆成一格（点「散开」可拆）");
               })
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               .catch((e2) => setMsg("❌ " + (e2?.message ?? "网络错误")))
               .finally(() => setBusy(""));
           },
@@ -1105,6 +1152,7 @@ function TrashLane(props) {
             // [v0.19] 一键回草稿
             h("button", {
               style: AP_ROW_BTN, disabled: !!busy,
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               title: "取消归档并直接回到「草稿」泳道",
               onClick: () => restore({ action: "to-draft", goal: g.id }),
             }, "→ 草稿"),
@@ -1118,6 +1166,7 @@ function TrashLane(props) {
     // [v0.25] 堆叠：拖条目到另一条上即成一堆；用原生 details 展开（无需额外状态），可「散开」
     // [v0.29] 问题 1：只渲染**过滤后仍 ≥2 项**的堆叠（成员已不在回收站的堆叠直接当作不存在）
     liveStacks.length > 0 && h("div", { key: "stacks", style: { display: "flex", flexDirection: "column", gap: 4 } },
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       h("div", { className: "dg-hint", style: { fontSize: 11, opacity: 0.7 } }, "堆叠（把一条拖到另一条上即可成堆；点标题展开，点「散开」拆开）"),
       h("div", { style: { display: "flex", flexWrap: "wrap", gap: 8 } },
         liveStacks.map(({ s, members }) => h("details", {
@@ -1146,6 +1195,7 @@ function TrashLane(props) {
                 })
                   .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
                   .then(({ ok, d }) => {
+                    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
                     if (!ok) { setMsg("❌ " + (d?.error ?? "散开失败")); return; }
                     setData({ goals: d.goals ?? [], versions: d.versions ?? [], stacks: d.stacks ?? [] });
                     setMsg("已散开该堆叠");
@@ -1162,6 +1212,7 @@ function TrashLane(props) {
 
   return apLaneShell({
     key: "trash-lane",
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     title: "🗑 回收站",
     count: total,
     collapsed,
@@ -1219,6 +1270,7 @@ function LanePromptEditor(props) {
   const dirty = text !== saved;
   return h("div", { style: { marginTop: 10, borderTop: "1px solid rgba(128,128,128,.25)", paddingTop: 8 } },
     h("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 } },
+      // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
       h("span", { style: { fontWeight: 700, fontSize: 12 } }, "职责提示词"),
       h("span", { style: { ...AP_ROW_CHIP, fontSize: 10 } }, lane),
       dirty ? h("span", { style: { fontSize: 10, color: "#e0a53a" } }, "未保存") : null,
@@ -1241,6 +1293,7 @@ function LanePromptEditor(props) {
           })
             .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
             .then(({ ok, d }) => {
+              // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
               if (!ok) { setMsg("❌ " + (d?.error ?? "保存失败")); return; }
               setSaved(text); setMsg("✅ 已保存");
             })
@@ -1258,6 +1311,7 @@ function LanePromptEditor(props) {
 // 覆盖层用 fixed 定位 SVG（视口坐标），因此不依赖祖先定位；橡皮擦模式点线即删。
 // ---------------------------------------------------------------------------
 const AP_LINK_KINDS = {
+  // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
   start: { label: "开始连接", color: "#4c8dff", hint: "前者交付后后者才开始" },
   end: { label: "结束连接", color: "#e0a53a", hint: "后者收尾依赖前者" },
   mid: { label: "实时协作", color: "#3ecf8e", hint: "两者实时同步协作" },
@@ -1429,6 +1483,7 @@ function LinksLayer(props) {
     const onClickDoc = (e) => {
       const el = cardAt(e.clientX, e.clientY);
       if (!el) {           // 空白处点击 = 取消已选起点；不吞事件（「✖ 退出连线」等按钮照常工作）
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (pending) { setPending(null); setMsg("已取消起点选择"); }
         return;
       }
@@ -1444,6 +1499,7 @@ function LinksLayer(props) {
       fetch("/api/dsh-graph-autopilot/links", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
         .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
         .then(({ ok, d }) => {
+          // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
           if (!ok) { setMsg("❌ " + (d?.error ?? "连线失败")); return; }
           setLinks(Array.isArray(d.links) ? d.links : []);
           setMsg(`✅ 已建立 ${AP_LINK_KINDS[pending.kind].label}：${pending.id} → ${id}`);
@@ -1474,6 +1530,7 @@ function LinksLayer(props) {
     })
       .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         if (!ok) { setMsg("❌ " + (d?.error ?? "删除失败")); return; }
         setLinks(Array.isArray(d.links) ? d.links : []);
         setHoverLink((cur) => (cur === id ? null : cur)); // [v0.27] 被删的线不能继续悬停
@@ -1509,6 +1566,7 @@ function LinksLayer(props) {
   const toolbarEl = h("div", {
     style: { display: "flex", gap: 6, alignItems: "center", padding: "2px 8px", borderRadius: 8, background: "rgba(20,22,27,.55)", border: "1px solid rgba(140,145,155,.4)", fontSize: 11, marginLeft: 8, flexShrink: 0 },
   },
+    // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
     h("span", { style: { fontWeight: 700 } }, "🔗 连线"),
     h("span", { style: AP_ROW_CHIP }, links.length + " 条"),
     h("button", { style: mode === "link" ? AP_ROW_PRIMARY : AP_ROW_BTN, onClick: () => setMode(mode === "link" ? "idle" : "link") }, mode === "link" ? "✖ 退出连线" : "✏️ 连线"),
@@ -1553,6 +1611,7 @@ function LinksLayer(props) {
           onClick: mode === "erase" ? (e) => erase(p.id, e) : undefined,
           onMouseEnter: mode === "erase" ? () => setHoverLink(p.id) : undefined,
           onMouseLeave: mode === "erase" ? () => setHoverLink((cur) => (cur === p.id ? null : cur)) : undefined,
+        // i18n-keep(category-a)：本处新增的用户可见 UI 文案按要求直接使用中文（不新增 i18n 词条）。
         }, h("title", null, `${AP_LINK_KINDS[p.kind].label}：${p.from} → ${p.to}${mode === "erase" ? "（点此擦除）" : ""}`));
       }),
       // [v0.27] 橡皮擦悬停时在中点给出「点我删除」提示

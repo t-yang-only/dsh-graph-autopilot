@@ -18,6 +18,9 @@ test("全部 graph_* 工具在 mock ctx 下可执行且输出无损 JSON", async
   const root = mkdtempSync(join(tmpdir(), "dsh-graph-plugin-"));
   init(root);
   const registered: any[] = [];
+  // 本套件只驱动 graph_* 面（host 侧守卫在 index.js；autopilot_* 工具面另有专测）。
+  // 注册计数按真源取「实际注册的 graph_* 工具集合」而非硬编码常量：v0.29 新增
+  // graph_ap_control / graph_collab_post / graph_collab_read 后，49 已过时。
   const ctx = {
     get: () => undefined, // 无 subagents 服务 → 走降级分支
     effect: (fn: () => unknown) => fn(),
@@ -30,12 +33,21 @@ test("全部 graph_* 工具在 mock ctx 下可执行且输出无损 JSON", async
     },
   };
   apply(ctx as any, { root });
-  assert.equal(registered.length, 49); // 全量 49 个 graph_* 工具（g-374 新增 graph_write_results/graph_refresh_results）
+  // 全量 graph_* 工具（g-374 新增 graph_write_results/graph_refresh_results；
+  // g-369 新增 3 个共享卡工具；v0.29 新增 graph_ap_control/graph_collab_post/graph_collab_read）
+  const graphTools = registered.filter((d) => d.name.startsWith("graph_"));
+  assert.equal(graphTools.length, 52, "全量 graph_* 工具数（v0.29 起 52）");
+  assert.equal(new Set(graphTools.map((d) => d.name)).size, graphTools.length, "graph_* 工具名无重复");
+  // autopilot_* 面由自动驾驶层注册（run 形态定义，非 graph_* 面，另由自动驾驶专测覆盖）。
+  const autopilotTools = registered.filter((d) => d.name.startsWith("autopilot_"));
+  assert.equal(registered.length, graphTools.length + autopilotTools.length, "注册面只允许 graph_* 与 autopilot_* 两类名字");
 
   const byName = new Map(registered.map((d) => [d.name, d]));
   const exec = { agent: undefined, signal: new AbortController().signal };
   const call = async (name: string, args: Record<string, unknown>) => {
-    const out = await byName.get(name)!.execute(args, exec);
+    // graph_* 走 execute；autopilot 层工具以 run 形态注册（同一执行语义的两种定义形状）
+    const def = byName.get(name)!;
+    const out = typeof def.execute === "function" ? await def.execute(args, exec) : await def.run(args, exec);
     assertLossless(out);
     return out as any;
   };
@@ -76,6 +88,19 @@ test("全部 graph_* 工具在 mock ctx 下可执行且输出无损 JSON", async
   assert.equal(typeof readSupervisorStatusAt(root), "number");
   await call("graph_amend_goal", { goal, note: "测试修订", append: "补充：修订内容" });
   await call("graph_move_goal", { goal, to: "standalone" });
+  // v0.29 新增三件套（本用例要求「全部工具可执行且无损」，新增工具必须被真实驱动）：
+  // 这族工具经 autopilotRoot 解析 workspace（无会话 cwd 时必须显式传 workspace，g-149 语义）；
+  // graph_collab_post 发协作消息；graph_collab_read 读回同一条；
+  // graph_ap_control 以只读 status action 触达主控制面（不产生副作用）。
+  const collabPosted = await call("graph_collab_post", { text: "plugin 用例协作探针", goal, workspace: root });
+  assert.equal(collabPosted.ok, true);
+  const collabRead = await call("graph_collab_read", { workspace: root });
+  assert.ok(
+    collabRead.messages.some((m: any) => m.text === "plugin 用例协作探针"),
+    "graph_collab_read 能读回 graph_collab_post 写入的消息",
+  );
+  const apControl = await call("graph_ap_control", { action: "status", workspace: root });
+  assert.equal(apControl.ok, true);
   const v = await call("graph_validate", {});
   assert.deepEqual(v.problems, []);
   const r = await call("graph_rebuild", {});
@@ -158,9 +183,15 @@ test("g-113 graph_start_attempt 注入目标相对路径以 workspace 根为基�
   const out = await byName.get("graph_start_attempt")!.execute({ goal: goalId }, exec);
   assert.equal(out.child_id, "child-x");
   // 子代理工作目录 = workspace 根 → 相对路径必须含 .dsh-graph 前缀（此前 relative(rootFor,...) 会漏掉它）
+  // 注：relative() 按平台产出分隔符（Windows 为 `\`），提示词回显原样字符串；
+  // 断言比较前统一为 `/`，判据不变：仍要求路径以 workspace 根为基准且带 .dsh-graph 前缀。
   const expected = relative(ws, findGoalFile(join(ws, ".dsh-graph"), goalId));
-  assert.ok(capturedPrompt.includes(expected), `prompt 含 workspace 根基准相对路径：${expected}`);
-  assert.ok(capturedPrompt.includes(".dsh-graph/versions/v-t/goals/"), "路径带 .dsh-graph 前缀（不是 versions/... 裸相对）");
+  const promptPath = capturedPrompt.replaceAll("\\", "/");
+  assert.ok(
+    promptPath.includes(expected.replaceAll("\\", "/")),
+    `prompt 含 workspace 根基准相对路径：${expected}`,
+  );
+  assert.ok(promptPath.includes(".dsh-graph/versions/v-t/goals/"), "路径带 .dsh-graph 前缀（不是 versions/... 裸相对）");
 });
 
 // ===== g-202：graph_start_attempt 统一覆盖 Goal execution 与 card collection =====
