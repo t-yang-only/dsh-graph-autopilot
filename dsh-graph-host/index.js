@@ -6243,12 +6243,17 @@ export function apply(ctx, config) {
                 appendEvent(r, { actor: "system:autopilot", event: "autopilot.lane_resumed", details: { version: intent.version, queue: (resumed?.queue ?? []).length } });
               } catch (re) {
                 const msg = String(re?.message ?? re);
-                // 「已在执行中」属于**暂时性**阻塞（上一轮 attempt 的陈旧状态尚未收尾）→ 保留意图，下一轮继续尝试恢复；
-                // 只有硬错误（泳道不存在等）才清掉意图，避免每分钟刷日志。
-                if (!/已在执行中|等待当前 attempt 收尾/.test(msg)) {
+                // [v0.41] 「已在执行中」属暂时性（陈旧 attempt 尚未收尾）→ 保留意图继续试；
+                // 但**目标已交付**、泳道无可派发目标（全部完成）这类**终结性**错误必须清意图，
+                // 否则会一直重试并刷 lane_resume_pending（实测 g-006 交付后每分钟一条）。
+                const terminal = /已交付|没有可派发目标/.test(msg) && !/已在执行中|等待当前 attempt 收尾/.test(msg);
+                if (terminal || !/已在执行中|等待当前 attempt 收尾/.test(msg)) {
                   clearRunnerIntent(r);
                 }
-                appendEvent(r, { actor: "system:autopilot", event: "autopilot.lane_resume_pending", details: { version: intent.version, error: msg.slice(0, 200), transient: /已在执行中|等待当前 attempt 收尾/.test(msg) } });
+                // 终结性错误（目标已交付/泳道已空）= 正常的收尾，不写事件（否则每分钟刷一条噪声）
+                if (!terminal) {
+                  appendEvent(r, { actor: "system:autopilot", event: "autopilot.lane_resume_pending", details: { version: intent.version, error: msg.slice(0, 200), transient: /已在执行中|等待当前 attempt 收尾/.test(msg) } });
+                }
               }
               }
             }
