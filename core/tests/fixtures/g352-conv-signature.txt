@@ -1,8 +1,8 @@
 # g352-conv-signature —— 会话内看板页签元素签名冻结基线（v0.17.0 开发线重新冻结：g-367 给窄档搜索聚合泳道加分区组头，250px 非搜索页签的渲染契约逐字未变 ⇒ content-sha 未变，仅 source-sha256 头随 kanban.js 变更；本次为 PLUGIN_VERSION 0.17.0-alpha→0.17.0 版本串刷新，正文与 content-sha256 同样逐字节未变）
-# source-commit: 2f59f93b84f8905b9c5ccd3004d1403c3b3bade5
-# source-sha256: 54fef9d8054f28b7d5de91568686b21cb05fbd76d88c4c7f0e51fcdaf4fdbd4f
+# source-commit: 008afbbd0a9666743978f2146cd7f7bcd58de981
+# source-sha256: 850674218d94f13cdc12dd45086630bcebf1155a56b96497fd1878897cf3e9dc
 # source-files: kanban,constants,narrow-width,helpers   # 源 hash 覆盖的模块（决定头部/泳道渲染）
-# content-sha256: 5ad995097616a04dc361d0c77b82d5b47cda88dca940bb4aa79f42268e51037f
+# content-sha256: 01c9808848804894298c9f6584807248b8d05682daa63ccbf2457d06ac83c334
 # board-width: 250
 div key=kanban-0 class=dg-kanban-root style=color=inherit;fontSize=13;minWidth=0;overflowX=auto;padding=12;position=relative;zIndex=1 flags=-
   style key=- class=- style=- flags=-
@@ -42,8 +42,6 @@ div key=kanban-0 class=dg-kanban-root style=color=inherit;fontSize=13;minWidth=0
               GoalTags key=- class=- style=- flags=-
               div key=- class=- style=fontSize=12;opacity=0.65 flags=-
                 CriteriaProgress key=- class=- style=- flags=-
-            div key=draft-action class=dg-draft-action style=display=flex;justifyContent=flex-end;marginBottom=4;marginTop=2;minWidth=0 flags=-
-              button key=- class=dg-btn style=background=var(--dsw-alias-interactive-bg-hover-solid, rgba(128,128,128,.15));border=1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.30));borderRadius=4;color=var(--dsw-alias-label-primary, #e6e6e6);cursor=pointer;fontSize=10;lineHeight=1.4;padding=1px 6px;whiteSpace=nowrap flags=title
       div key=v-v1-v-collect class=- style=display=flex;flexDirection=column;gap=4;minWidth=0 flags=-
         div key=- class=- style=alignItems=center;display=flex;fontWeight=600;gap=6;justifyContent=space-between;opacity=0.8;padding=4px 6px 2px;textAlign=left;whiteSpace=nowrap flags=-
           span key=- class=- style=minWidth=0;overflow=hidden;textOverflow=ellipsis flags=-
