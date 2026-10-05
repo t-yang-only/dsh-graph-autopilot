@@ -206,6 +206,8 @@ import {
   laneHealth,
   listRegistry,
   setCriteriaChecked,
+  // [v0.43] 推进模式自动确认判据需要读取目标的判据条目
+  criteriaItemsOf,
   unmetCriteria,
   listLinks,
   addLink,
@@ -6465,6 +6467,30 @@ export function apply(ctx, config) {
             if (wantAdvance && st.reviewMode === "auto") {
               try {
                 {
+                  // [v0.43] 推进模式先**自动确认判据**：派发准入门禁要求「判据已确认」，而目标建好后
+                  // 判据默认是未确认状态 —— 推进模式不打这一环，目标就永远到不了可派发
+                  // （实测 g-003/g-008/g-009 全部卡在「判据 0/N 已勾」，推进 30 分钟零进展）。
+                  // 与执行语义一致：推进=负责人授权自动推进，故可代为确认既有判据（绝不新增判据内容）。
+                  try {
+                    for (const ln0 of [...listLanesWithOpenGoals(r).map((x) => x.lane), "standalone"]) {
+                      let plan0 = null;
+                      try { plan0 = laneReadiness(r, ln0, { isLive: (cid) => childLiveState(cid) !== "gone" }); } catch { continue; }
+                      for (const g0 of plan0.goals) {
+                        if (!['planning', 'ready', 'collecting', 'draft'].includes(String(g0.status))) continue;
+                        const blockers = (g0.blockers ?? []).join("；");
+                        if (!/未确认判据/.test(blockers)) continue;
+                        try {
+                          const gf0 = findGoalFile(r, g0.id);
+                          const items = criteriaItemsOf(r, g0.id);
+                          if (items.length) {
+                            setCriteria(r, g0.id, items, "system:autopilot");
+                            appendEvent(r, { actor: "system:autopilot", event: "autopilot.advance_auto_confirm_criteria", goal: g0.id, details: { lane: ln0, count: items.length } });
+                            autopilotLog(`推进模式：goal=${g0.id} 自动确认 ${items.length} 条判据（放行派发）`);
+                          }
+                        } catch (ce) { autopilotLog(`推进模式确认判据 goal=${g0.id} 失败：${String(ce?.message ?? ce)}`); }
+                      }
+                    }
+                  } catch { /* 判据确认失败不影响后续裁决 */ }
                   const reviewerLanes = listLanesWithOpenGoals(r).map((x) => x.lane);
                   let adjudicated = 0;
                   for (const ln of [...reviewerLanes, "standalone"]) {
