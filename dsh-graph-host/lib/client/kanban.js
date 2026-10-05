@@ -122,19 +122,10 @@
       const withDraftAction = (cardEl) => {
         const goalId = cardEl?.props?.["data-goal-id"]; // Card 根节点 data-goal-id 即目标 id
         if (!cardEl || !goalId) return cardEl;
-        // [v0.27] i18n-keep(category-a)：卡片动作按钮的标签与 tooltip 为中文
-        const actionRow = h("div", {
-          key: "draft-action",
-          className: "dg-draft-action",
-          style: { display: "flex", justifyContent: "flex-end", marginTop: 2, marginBottom: 4, minWidth: 0 },
-        },
-          h("button", {
-            className: "dg-btn",
-            style: { ...S.btn, fontSize: 10, padding: "1px 6px", lineHeight: 1.4, whiteSpace: "nowrap" },
-            title: "→ 草稿：中断执行并把整个目标目录暂存进草稿（含卡片与执行记录，force）",
-            disabled: draftBusyId === goalId,
-            onClick: (e) => { e.stopPropagation(); sendGoalToDraft(goalId); },
-          }, draftBusyId === goalId ? "…" : "→ 草稿"));
+        // [v0.37] 用户明确要求：**任务台上的任务卡片右下角不再显示「→ 草稿」**（嫌占位置、易误触）。
+        // 该能力保留，入口改为：① 面板「🗄 归档」行的「→ 草稿」；② 回收站条目的「→ 草稿」；
+        // ③ 主对话 graph_ap_control 的 trash_to_draft。故这里不再渲染动作行（只保留角标）。
+        const actionRow = null;
         // [v0.29] 问题 7：绿点作为包裹层的第一个子节点（绝对定位到卡片右上角）——**不新增 Card
         // 调用点**、不复制/不克隆 .dg-card 元素，g-366「每张命中卡只渲染一次」与 cardEls 计数契约不变。
         const liveDot = liveChildGoals.has(goalId)

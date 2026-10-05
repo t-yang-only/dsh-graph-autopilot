@@ -6357,6 +6357,39 @@ export function apply(ctx, config) {
             // ═══ [v0.34] 问题 4 收尾：全部交付 → 写 advance_completed 并自动关闭 advanceMode ═══
             // 用户要求：「跑到交付才可以停止，然后本工作区的托管功能自行关闭」。
             // steward.enabled 为真时**不自动关闭**（全局托管是永续的），只写完成事件。
+            // ═══ [v0.37] 推进模式：review 目标由系统**直接裁决**（不空等管理 AI） ═══
+            // 实测：g-008 停在 review 挡住下游，管理 AI 被唤起 10 次仍没推进它 ——
+            // 「自行解决」的正确形态是系统按机审规则自己裁决：判据齐全 ⇒ 接受进交付；
+            // 判据缺失 ⇒ 打回执行层继续改（与自动执行的裁决语义一致，不越权新增标准）。
+            if (wantAdvance && st.reviewMode === "auto") {
+              try {
+                {
+                  const reviewerLanes = listLanesWithOpenGoals(r).map((x) => x.lane);
+                  let adjudicated = 0;
+                  for (const ln of [...reviewerLanes, "standalone"]) {
+                    let plan2 = null;
+                    try { plan2 = laneReadiness(r, ln, { isLive: (cid) => childLiveState(cid) !== "gone" }); } catch { continue; }
+                    for (const g of plan2.goals) {
+                      if (g.status !== "review") continue;
+                      const unmet = unmetCriteria(r, g.id);
+                      try {
+                        if (unmet.length === 0) {
+                          resolveAccept(r, g.id, { actor: "system:autopilot", verdict: "accept", force: true, reason: "推进模式机审：判据已全部打勾，自动接受进交付" });
+                          appendEvent(r, { actor: "system:autopilot", event: "autopilot.advance_auto_accepted", goal: g.id, details: { lane: ln } });
+                          autopilotLog(`推进模式：goal=${g.id} 判据齐全 → 自动接受进交付`);
+                        } else {
+                          transition(r, g.id, "in_progress", { actor: "system:autopilot", reason: `推进模式机审：判据未完成 ${unmet.length} 条（${unmet.slice(0, 2).join(" / ")}）→ 打回执行层`, force: true });
+                          appendEvent(r, { actor: "system:autopilot", event: "autopilot.advance_auto_rework", goal: g.id, details: { lane: ln, unmet } });
+                          autopilotLog(`推进模式：goal=${g.id} 判据未完成 ${unmet.length} 条 → 打回执行层`);
+                        }
+                        adjudicated++;
+                      } catch (ae) { autopilotLog(`推进模式裁决 goal=${g.id} 失败（跳过）：${String(ae?.message ?? ae)}`); }
+                    }
+                  }
+                  if (adjudicated) autopilotLog(`推进模式本轮裁决 ${adjudicated} 个 review 目标`);
+                }
+              } catch (e) { autopilotLog(`推进模式裁决失败（不影响定时器）：${String(e?.message ?? e)}`); }
+            }
             if (wantAdvance) {
               try {
                 const adv = workspaceAdvanceStatus(r);
