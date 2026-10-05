@@ -1523,6 +1523,22 @@ export function apply(ctx, config) {
           const cs = a?.session?.contextSize ?? a?.contextSize ?? null;
           if (Number.isFinite(cs)) contextSize = cs;
         } catch { /* 拿不到就置 null */ }
+        // [v0.38] 用量落盘：子代理一旦 gone，其 session.usage 就随进程消失（实测 18/18 全 null，
+        // 用户要看的 token 数全变成「—」）。这里在**还能读到**时把它写进 attempt 目录的 usage.json，
+        // 之后即便子代理消失、甚至 DSH 重启，执行板仍有真实历史数据。
+        const usageFile = join(adir, att, "usage.json");
+        try {
+          if (tokens != null || inTokens != null || outTokens != null || contextSize != null) {
+            writeFileSync(usageFile, JSON.stringify({ tokens, in_tokens: inTokens, out_tokens: outTokens, context_size: contextSize, at: new Date().toISOString() }, null, 2) + "\n", "utf8");
+          } else if (existsSync(usageFile)) {
+            // 读不到实时值就回读落盘的历史值（子代理已结束/重启后的正常路径）
+            const saved = JSON.parse(readFileSync(usageFile, "utf8"));
+            if (Number.isFinite(saved?.tokens)) tokens = saved.tokens;
+            if (Number.isFinite(saved?.in_tokens)) inTokens = saved.in_tokens;
+            if (Number.isFinite(saved?.out_tokens)) outTokens = saved.out_tokens;
+            if (Number.isFinite(saved?.context_size)) contextSize = saved.context_size;
+          }
+        } catch { /* 落盘/回读失败不影响其它字段 */ }
         // [v0.34] 该 attempt 改动的文件：attempt 目录下的 files.json / changes.json / touches.json（若存在）。
         // 这是「子代理正在读写哪些文件」的持久化来源；拿不到就空数组（前端显示「—」）。
         let filesChanged = [];
