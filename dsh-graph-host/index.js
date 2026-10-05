@@ -6278,6 +6278,7 @@ export function apply(ctx, config) {
                     "每步操作后请在协作频道（graph_collab_post）登记原因。",
                   ].join("\n");
                   writeAutopilotState(r, { advanceNudgedAt: new Date().toISOString() }, { actor: "system:autopilot" });
+                  st.advanceNudgedAt = new Date().toISOString(); // [v0.36.3] 同 gatekeeper：写盘后同步内存快照
                   appendEvent(r, {
                     actor: "system:autopilot",
                     event: "autopilot.advance_stalled",
@@ -6312,6 +6313,9 @@ export function apply(ctx, config) {
                     "推进后请在协作频道（graph_collab_post）登记原因；目标是把整条链路推到交付。",
                   ].join("\n");
                   writeAutopilotState(r, { gatekeeperNudgedAt: new Date().toISOString() }, { actor: "system:autopilot" });
+                  // [v0.36.3] 关键：本轮 st 是循环开头读的快照，写盘后必须同步到内存，
+                  // 否则同一轮里若有其它分支再判冷却仍看到旧值（实测曾出现 12 次密集唤起）。
+                  st.gatekeeperNudgedAt = new Date().toISOString();
                   appendEvent(r, {
                     actor: "system:autopilot",
                     event: "autopilot.gatekeeper_auto_manager",
