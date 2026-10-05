@@ -5550,6 +5550,31 @@ export function apply(ctx, config) {
                   : "没有陈旧的进行中 attempt（任务卡住可能是其它原因：判据未确认 / 连线门禁 / 泳道无 ready 目标）",
               };
             }
+            // [v0.36.3] 模板管理（补「主对话控制一切」的缺口：模板此前只能从界面操作）
+            case "template_list": return { ok: true, templates: listTemplates(root) };
+            case "template_create": {
+              const t = saveTemplate(root, { id: null, title: a.text, type: a.kind, description: a.note, criteria: Array.isArray(a.items) ? a.items : [], scope: a.scope === "global" ? "global" : "workspace" }, autopilotActor(ex));
+              return { ok: true, template: t, templates: listTemplates(root) };
+            }
+            case "template_update": {
+              if (!a.id) return { ok: false, error: "missing id" };
+              const t = saveTemplate(root, { id: String(a.id), title: a.text, type: a.kind, description: a.note, criteria: Array.isArray(a.items) ? a.items : [], scope: a.scope === "global" ? "global" : "workspace" }, autopilotActor(ex));
+              return { ok: true, template: t, templates: listTemplates(root) };
+            }
+            case "template_delete": {
+              if (!a.id) return { ok: false, error: "missing id" };
+              deleteTemplate(root, String(a.id), autopilotActor(ex), { scope: a.scope === "global" ? "global" : "workspace" });
+              return { ok: true, templates: listTemplates(root) };
+            }
+            case "template_from_goal": {
+              if (!a.goal) return { ok: false, error: "missing goal" };
+              const t = createTemplateFromGoal(root, String(a.goal), { name: a.text ?? null, scope: a.scope === "global" ? "global" : "workspace" }, autopilotActor(ex));
+              return { ok: true, template: t, templates: listTemplates(root) };
+            }
+            case "template_apply": {
+              if (!a.id) return { ok: false, error: "missing id" };
+              return { ok: true, ...applyTemplate(root, String(a.id), { version: a.version ?? null, actor: autopilotActor(ex) }) };
+            }
             // [v0.31] 泳道健康：把「反复派发却没成功」这类隐性卡点变成可见数据
             case "health": {
               const rows0 = laneHealth(root, a.lane ?? null);
