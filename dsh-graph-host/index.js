@@ -5137,6 +5137,32 @@ export function apply(ctx, config) {
     }
 
     function autopilotStart(root, version, reviewMode, actor) {
+      // [v0.39] 卡死 runner 自动回收（真 bug 修复）：run 单槽（每工作区一条），若上一条 runner
+      // 的 current 目标已无 live 子代理（子代理死了、或 attempt 被判死结），它会**永久占位** ⇒
+      // 后续任何起跑都被「该工作区已有执行中的泳道」拒绝、advance 分支也永不进入（实测：standalone
+      // 被 current=g-006 占位导致 20 分钟推进零进展）。这里在起跑前检测并自动释放。
+      const stuck = autopilotRunners.get(root);
+      if (stuck) {
+        let release = false;
+        try {
+          const curId = stuck.current?.goalId ?? null;
+          const curChild = curId ? (readGoalBinding(root, curId)?.child_id ?? null) : null;
+          const curLive = curChild ? childLiveState(curChild) : "gone";
+          const ageMs = stuck.current?.startedAt ? Date.now() - Date.parse(stuck.current.startedAt) : 0;
+          // 子代理已消失（gone）→ 认定占位卡死；或 current 目标已不在（被移走/归档）
+          if (!curId) release = true;
+          else if (curLive === "gone" && ageMs > 60_000) release = true;
+        } catch { /* 判定失败不动它 */ }
+        if (release) {
+          try { stuck.current?.controller?.abort(); } catch { /* 已结束 */ }
+          if (stuck.timer) clearTimeout(stuck.timer);
+          if (stuck.poll) clearInterval(stuck.poll);
+          autopilotRunners.delete(root);
+          clearRunnerIntent(root);
+          appendEvent(root, { actor: actor ?? "system:autopilot", event: "autopilot.runner_reclaimed", details: { version: stuck.version, stuck_goal: stuck.current?.goalId ?? null, reason: "占位 runner 的子代理已消失，自动回收以放行新起跑" } });
+          autopilotLog(`回收卡死的 runner（version=${stuck.version}，current=${stuck.current?.goalId ?? "-"}）—— 放行新起跑`);
+        }
+      }
       if (autopilotRunners.has(root)) throw new GraphError("该工作区已有执行中的泳道——先 autopilot_stop 再重新开始");
       // [v0.27] 问题 9 收尾：把「子代理是否还活着」接进 readiness 判定——DSH 重启后 attempt 子代理已死，
       // childLiveState 返回 "gone" 时不再以「已在执行中」阻断，自动恢复（autopilot-runner.json）才走得通。
@@ -6249,11 +6275,34 @@ export function apply(ctx, config) {
               return !Number.isFinite(t) || nowMs - t > coolMs;
             };
             // —— 推进：确保「有未完结目标」的泳道有 runner 在跑 ——
+            // [v0.39] 若已有 runner 但它是**卡死占位**（current 目标的子代理已消失），先回收再推进；
+            // 否则「有 runner」会让本分支永不进入（实测 20 分钟零进展的直接原因）。
+            if (wantAdvance) {
+              const existing = autopilotRunners.get(r);
+              if (existing) {
+                try {
+                  const curId = existing.current?.goalId ?? null;
+                  const curChild = curId ? (readGoalBinding(r, curId)?.child_id ?? null) : null;
+                  const curLive = curChild ? childLiveState(curChild) : "gone";
+                  const ageMs = existing.current?.startedAt ? nowMs - Date.parse(existing.current.startedAt) : 0;
+                  if (!curId || (curLive === "gone" && ageMs > 60_000)) {
+                    try { existing.current?.controller?.abort(); } catch { /* 已结束 */ }
+                    if (existing.timer) clearTimeout(existing.timer);
+                    if (existing.poll) clearInterval(existing.poll);
+                    autopilotRunners.delete(r);
+                    appendEvent(r, { actor: "system:autopilot", event: "autopilot.runner_reclaimed", details: { version: existing.version, stuck_goal: curId, reason: "推进模式发现占位 runner 的子代理已消失" } });
+                    autopilotLog(`推进模式：回收卡死 runner（version=${existing.version}，current=${curId ?? "-"}）`);
+                  }
+                } catch { /* 判定失败则不回收 */ }
+              }
+            }
             if (wantAdvance && !autopilotRunners.get(r)) {
               const openLanes = listLanesWithOpenGoals(r);
               if (openLanes.length) {
                 const lastTry = advanceStartAttempts.get(r) ?? 0;
-                if (nowMs - lastTry > 10 * 60_000) {
+                // [v0.39] 推进模式的冷却从 10 分钟收紧到 **2 分钟**：用户要求「不能停滞」，
+                // 10 分钟一轮太慢（实测 ta 在等的时候链路一动不动）。失败仍会进冷却，不会冲击派发。
+                if (nowMs - lastTry > 2 * 60_000) {
                   advanceStartAttempts.set(r, Date.now()); // 无论成败都进冷却：绝不反复冲击派发
                   const lane = openLanes[0].lane;
                   let started = null;
