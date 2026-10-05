@@ -5146,12 +5146,29 @@ export function apply(ctx, config) {
         let release = false;
         try {
           const curId = stuck.current?.goalId ?? null;
+          // [v0.40] **误杀修复**：v0.39 的条件「子代理 gone 且超 60s」太激进 —— 子代理启动后
+          // 需要时间才注册进 live registry，这段时间 childLiveState 也是 gone，于是**刚派发的
+          // 任务被自己的回收机制反复掐死**（实测 g-006 累积 13 个 attempt 全 cancelled）。
+          // 正确判据：必须**同时**满足 ① 子代理 gone、② 且 **attempt 本身也已非 pending**
+          // （说明这轮 attempt 确实结束了，不是还在启动中），才认定 runner 占位卡死。
           const curChild = curId ? (readGoalBinding(root, curId)?.child_id ?? null) : null;
           const curLive = curChild ? childLiveState(curChild) : "gone";
           const ageMs = stuck.current?.startedAt ? Date.now() - Date.parse(stuck.current.startedAt) : 0;
-          // 子代理已消失（gone）→ 认定占位卡死；或 current 目标已不在（被移走/归档）
+          let attemptPending = false;
+          try {
+            if (curId) {
+              const gf = findGoalFile(root, curId);
+              const attDir = join(dirname(gf), "attempts");
+              if (existsSync(attDir)) {
+                attemptPending = readdirSync(attDir).some((a) => {
+                  try { return String(loadGoal(join(attDir, a, "attempt.md")).meta?.result ?? "") === "pending"; } catch { return false; }
+                });
+              }
+            }
+          } catch { attemptPending = true; } // 读不到就保守视为仍在跑，不回收
           if (!curId) release = true;
-          else if (curLive === "gone" && ageMs > 60_000) release = true;
+          // 子代理 gone + attempt 已非 pending + 至少 5 分钟（给启动注册留足时间）⇒ 才回收
+          else if (curLive === "gone" && !attemptPending && ageMs > 5 * 60_000) release = true;
         } catch { /* 判定失败不动它 */ }
         if (release) {
           try { stuck.current?.controller?.abort(); } catch { /* 已结束 */ }
@@ -6282,10 +6299,24 @@ export function apply(ctx, config) {
               if (existing) {
                 try {
                   const curId = existing.current?.goalId ?? null;
+                  // [v0.40] 与 autopilotStart 同判据：子代理 gone **且** attempt 已非 pending
+                  // **且** 超 5 分钟才算占位（否则会误杀刚派发、还在注册中的任务）。
                   const curChild = curId ? (readGoalBinding(r, curId)?.child_id ?? null) : null;
                   const curLive = curChild ? childLiveState(curChild) : "gone";
                   const ageMs = existing.current?.startedAt ? nowMs - Date.parse(existing.current.startedAt) : 0;
-                  if (!curId || (curLive === "gone" && ageMs > 60_000)) {
+                  let attemptPending2 = false;
+                  try {
+                    if (curId) {
+                      const gf2 = findGoalFile(r, curId);
+                      const ad2 = join(dirname(gf2), "attempts");
+                      if (existsSync(ad2)) {
+                        attemptPending2 = readdirSync(ad2).some((a) => {
+                          try { return String(loadGoal(join(ad2, a, "attempt.md")).meta?.result ?? "") === "pending"; } catch { return false; }
+                        });
+                      }
+                    }
+                  } catch { attemptPending2 = true; }
+                  if (!curId || (curLive === "gone" && !attemptPending2 && ageMs > 5 * 60_000)) {
                     try { existing.current?.controller?.abort(); } catch { /* 已结束 */ }
                     if (existing.timer) clearTimeout(existing.timer);
                     if (existing.poll) clearInterval(existing.poll);
